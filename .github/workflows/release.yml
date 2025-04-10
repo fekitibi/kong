@@ -30,8 +30,8 @@ on:  # yamllint disable-line rule:truthy
 
 env:
   # official release repo
-  DOCKER_REPOSITORY: kong/kong
-  PRERELEASE_DOCKER_REPOSITORY: kong/kong-dev
+  # DOCKER_REPOSITORY: kong/kong
+  # PRERELEASE_DOCKER_REPOSITORY: kong/kong-dev
   FULL_RELEASE: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.actor == 'dependabot[bot]'}}
 
   # only for PR
@@ -46,8 +46,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       kong-version: ${{ steps.build-info.outputs.kong-version }}
-      prerelease-docker-repository: ${{ env.PRERELEASE_DOCKER_REPOSITORY }}
-      docker-repository: ${{ steps.build-info.outputs.docker-repository }}
+      # prerelease-docker-repository: ``
+      # docker-repository: ${{ steps.build-info.outputs.docker-repository }}
       release-desc: ${{ steps.build-info.outputs.release-desc }}
       release-label: ${{ steps.build-info.outputs.release-label || '' }}
       deploy-environment: ${{ steps.build-info.outputs.deploy-environment }}
@@ -75,18 +75,14 @@ jobs:
 
         if [ "${{ github.event.inputs.official }}" == "true" ]; then
           release_desc="$KONG_VERSION (official)"
-          echo "docker-repository=$DOCKER_REPOSITORY" >> $GITHUB_OUTPUT
           echo "deploy-environment=release" >> $GITHUB_OUTPUT
         else
           release_desc="$KONG_VERSION (pre-release)"
-          echo "docker-repository=$PRERELEASE_DOCKER_REPOSITORY" >> $GITHUB_OUTPUT
         fi
 
         echo "release-desc=$release_desc" >> $GITHUB_OUTPUT
 
         echo "matrix=$(yq -I=0 -o=json $matrix_file)" >> $GITHUB_OUTPUT
-
-        echo "docker-test-image=${{ env.PRERELEASE_DOCKER_REPOSITORY }}:${{ github.event.pull_request.head.sha || github.sha }}" >> $GITHUB_OUTPUT
 
         cat $GITHUB_OUTPUT
 
@@ -196,7 +192,7 @@ jobs:
         bazelisk-version: "1.20.0"
         # Avoid downloading Bazel every time.
         bazelisk-cache: true
-       
+
     - name: Install Deb Dependencies
       if: matrix.package == 'deb' && steps.cache-deps.outputs.cache-hit != 'true'
       run: |
@@ -279,361 +275,361 @@ jobs:
       matrix:
         include: "${{ fromJSON(needs.metadata.outputs.matrix)['build-packages'] }}"
 
-    steps:
-    - uses: actions/checkout@v4
+  #   steps:
+  #   - uses: actions/checkout@v4
 
-    - name: Download artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: ${{ matrix.label }}-packages
-        path: bazel-bin/pkg
+  #   - name: Download artifact
+  #     uses: actions/download-artifact@v4
+  #     with:
+  #       name: ${{ matrix.label }}-packages
+  #       path: bazel-bin/pkg
 
-    - name: Install Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip' # caching pip dependencies
+  #   - name: Install Python
+  #     uses: actions/setup-python@v5
+  #     with:
+  #       python-version: '3.11'
+  #       cache: 'pip' # caching pip dependencies
 
-    - name: Verify
-      run: |
-        cd scripts/explain_manifest
-        pip install -r requirements.txt
-        pkg=$(ls ../../bazel-bin/pkg/kong* |head -n1)
-        python ./main.py -f filelist.txt -p $pkg -o test.txt -s ${{ matrix.check-manifest-suite }}
+  #   - name: Verify
+  #     run: |
+  #       cd scripts/explain_manifest
+  #       pip install -r requirements.txt
+  #       pkg=$(ls ../../bazel-bin/pkg/kong* |head -n1)
+  #       python ./main.py -f filelist.txt -p $pkg -o test.txt -s ${{ matrix.check-manifest-suite }}
 
-  build-images:
-    name: Build Images - ${{ matrix.label }}
-    needs: [metadata, build-packages]
-    runs-on: ubuntu-24.04
+  # build-images:
+  #   name: Build Images - ${{ matrix.label }}
+  #   needs: [metadata, build-packages]
+  #   runs-on: ubuntu-24.04
 
-    permissions:
-      # create comments on commits for docker images needs the `write` permission
-      contents: write
+  #   permissions:
+  #     # create comments on commits for docker images needs the `write` permission
+  #     contents: write
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include: "${{ fromJSON(needs.metadata.outputs.matrix)['build-images'] }}"
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include: "${{ fromJSON(needs.metadata.outputs.matrix)['build-images'] }}"
 
-    steps:
-    - uses: actions/checkout@v4
+  #   steps:
+  #   - uses: actions/checkout@v4
 
-    - name: Download artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: ${{ matrix.artifact-from }}-packages
-        path: bazel-bin/pkg
+  #   - name: Download artifact
+  #     uses: actions/download-artifact@v4
+  #     with:
+  #       name: ${{ matrix.artifact-from }}-packages
+  #       path: bazel-bin/pkg
 
-    - name: Download artifact (alt)
-      if: matrix.artifact-from-alt != ''
-      uses: actions/download-artifact@v4
-      with:
-        name: ${{ matrix.artifact-from-alt }}-packages
-        path: bazel-bin/pkg
+  #   - name: Download artifact (alt)
+  #     if: matrix.artifact-from-alt != ''
+  #     uses: actions/download-artifact@v4
+  #     with:
+  #       name: ${{ matrix.artifact-from-alt }}-packages
+  #       path: bazel-bin/pkg
 
-    - name: Login to Docker Hub
-      if: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN == 'true' }}
-      uses: docker/login-action@e92390c5fb421da1463c202d546fed0ec5c39f20 # v2.1.0
-      with:
-        username: ${{ secrets.GHA_DOCKERHUB_PUSH_USER }}
-        password: ${{ secrets.GHA_KONG_ORG_DOCKERHUB_PUSH_TOKEN }}
+    # - name: Login to Docker Hub
+    #   if: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN == 'true' }}
+    #   uses: docker/login-action@e92390c5fb421da1463c202d546fed0ec5c39f20 # v2.1.0
+    #   with:
+    #     username: ${{ secrets.GHA_DOCKERHUB_PUSH_USER }}
+    #     password: ${{ secrets.GHA_KONG_ORG_DOCKERHUB_PUSH_TOKEN }}
 
-    - name: Docker meta
-      id: meta
-      uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5
-      env:
-        DOCKER_METADATA_PR_HEAD_SHA: true
-      with:
-        images: ${{ needs.metadata.outputs.prerelease-docker-repository }}
-        tags: |
-          type=raw,${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
-          type=raw,enable=${{ matrix.label == 'ubuntu' }},${{ needs.metadata.outputs.commit-sha }}
+    # - name: Docker meta
+    #   id: meta
+    #   uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5
+    #   env:
+    #     DOCKER_METADATA_PR_HEAD_SHA: true
+    #   with:
+    #     images: ${{ needs.metadata.outputs.prerelease-docker-repository }}
+    #     tags: |
+    #       type=raw,${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
+    #       type=raw,enable=${{ matrix.label == 'ubuntu' }},${{ needs.metadata.outputs.commit-sha }}
 
-    - name: Set up QEMU
-      if: matrix.docker-platforms != ''
-      uses: docker/setup-qemu-action@53851d14592bedcffcf25ea515637cff71ef929a # v3
+    # - name: Set up QEMU
+    #   if: matrix.docker-platforms != ''
+    #   uses: docker/setup-qemu-action@53851d14592bedcffcf25ea515637cff71ef929a # v3
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3
+    # - name: Set up Docker Buildx
+    #   uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3
 
-    - name: Set platforms
-      id: docker_platforms_arg
-      run: |
-        platforms="${{ matrix.docker-platforms }}"
-        if [[ -z "$platforms" ]]; then
-          platforms="linux/amd64"
-        fi
+    # - name: Set platforms
+    #   id: docker_platforms_arg
+    #   run: |
+    #     platforms="${{ matrix.docker-platforms }}"
+    #     if [[ -z "$platforms" ]]; then
+    #       platforms="linux/amd64"
+    #     fi
 
-        echo "platforms=$platforms"
-        echo "platforms=$platforms" >> $GITHUB_OUTPUT
+    #     echo "platforms=$platforms"
+    #     echo "platforms=$platforms" >> $GITHUB_OUTPUT
 
-    - name: Set rpm platform
-      id: docker_rpm_platform_arg
-      if: matrix.package == 'rpm'
-      run: |
-        rpm_platform="${{ matrix.rpm_platform }}"
-        if [[ -z "$rpm_platform" ]]; then
-          rpm_platform="el9"
-        fi
+    # - name: Set rpm platform
+    #   id: docker_rpm_platform_arg
+    #   if: matrix.package == 'rpm'
+    #   run: |
+    #     rpm_platform="${{ matrix.rpm_platform }}"
+    #     if [[ -z "$rpm_platform" ]]; then
+    #       rpm_platform="el9"
+    #     fi
 
-        echo "rpm_platform=$rpm_platform"
-        echo "rpm_platform=$rpm_platform" >> $GITHUB_OUTPUT
+    #     echo "rpm_platform=$rpm_platform"
+        # echo "rpm_platform=$rpm_platform" >> $GITHUB_OUTPUT
 
-    - name: Build Docker Image
-      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
-      with:
-        file: build/dockerfiles/${{ matrix.package }}.Dockerfile
-        context: .
-        push: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN == 'true' }}
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        platforms: ${{ steps.docker_platforms_arg.outputs.platforms }}
-        build-args: |
-          KONG_BASE_IMAGE=${{ matrix.base-image }}
-          KONG_ARTIFACT_PATH=bazel-bin/pkg
-          KONG_VERSION=${{ needs.metadata.outputs.kong-version }}
-          RPM_PLATFORM=${{ steps.docker_rpm_platform_arg.outputs.rpm_platform }}
-          EE_PORTS=8002 8445 8003 8446 8004 8447
+  #   - name: Build Docker Image
+  #     uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+  #     with:
+  #       file: build/dockerfiles/${{ matrix.package }}.Dockerfile
+  #       context: .
+  #       push: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN == 'true' }}
+  #       tags: ${{ steps.meta.outputs.tags }}
+  #       labels: ${{ steps.meta.outputs.labels }}
+  #       platforms: ${{ steps.docker_platforms_arg.outputs.platforms }}
+  #       build-args: |
+  #         KONG_BASE_IMAGE=${{ matrix.base-image }}
+  #         KONG_ARTIFACT_PATH=bazel-bin/pkg
+  #         KONG_VERSION=${{ needs.metadata.outputs.kong-version }}
+  #         RPM_PLATFORM=${{ steps.docker_rpm_platform_arg.outputs.rpm_platform }}
+  #         EE_PORTS=8002 8445 8003 8446 8004 8447
 
-    - name: Comment on commit
-      if: github.event_name == 'push' && matrix.label == 'ubuntu'
-      uses: peter-evans/commit-comment@5a6f8285b8f2e8376e41fe1b563db48e6cf78c09 # v3.0.0
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        body: |
-          ### Bazel Build
-          Docker image available `${{ needs.metadata.outputs.prerelease-docker-repository }}:${{ needs.metadata.outputs.commit-sha }}`
-          Artifacts available https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  #   - name: Comment on commit
+  #     if: github.event_name == 'push' && matrix.label == 'ubuntu'
+  #     uses: peter-evans/commit-comment@5a6f8285b8f2e8376e41fe1b563db48e6cf78c09 # v3.0.0
+  #     with:
+  #       token: ${{ secrets.GITHUB_TOKEN }}
+  #       body: |
+  #         ### Bazel Build
+  #         Docker image available `${{ needs.metadata.outputs.prerelease-docker-repository }}:${{ needs.metadata.outputs.commit-sha }}`
+  #         Artifacts available https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-  verify-manifest-images:
-    needs: [metadata, build-images]
-    name: Verify Manifest - Image ${{ matrix.label }}
-    runs-on: ubuntu-24.04
-    if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')
+  # verify-manifest-images:
+  #   needs: [metadata, build-images]
+  #   name: Verify Manifest - Image ${{ matrix.label }}
+  #   runs-on: ubuntu-24.04
+  #   if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include: "${{ fromJSON(needs.metadata.outputs.matrix)['build-images'] }}"
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include: "${{ fromJSON(needs.metadata.outputs.matrix)['build-images'] }}"
 
-    steps:
-    - uses: actions/checkout@v4
+  #   steps:
+  #   - uses: actions/checkout@v4
 
-    - name: Install Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip' # caching pip dependencies
+  #   - name: Install Python
+  #     uses: actions/setup-python@v5
+  #     with:
+  #       python-version: '3.11'
+  #       cache: 'pip' # caching pip dependencies
 
-    - name: Verify
-      run: |
-        cd scripts/explain_manifest
-        # docker image verify requires sudo to set correct permissions, so we
-        # also install deps for root
-        sudo -E pip install -r requirements.txt
-        IMAGE=${{ env.PRERELEASE_DOCKER_REPOSITORY }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
+  #   - name: Verify
+  #     run: |
+  #       cd scripts/explain_manifest
+  #       # docker image verify requires sudo to set correct permissions, so we
+  #       # also install deps for root
+  #       sudo -E pip install -r requirements.txt
+  #       IMAGE=${{ env.PRERELEASE_DOCKER_REPOSITORY }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
 
-        sudo -E python ./main.py --image $IMAGE -f docker_image_filelist.txt -s docker-image
+  #       sudo -E python ./main.py --image $IMAGE -f docker_image_filelist.txt -s docker-image
 
-        if [[ ! -z "${{ matrix.docker-platforms }}" ]]; then
-          DOCKER_DEFAULT_PLATFORM=linux/arm64 sudo -E python ./main.py --image $IMAGE -f docker_image_filelist.txt -s docker-image
-        fi
+  #       if [[ ! -z "${{ matrix.docker-platforms }}" ]]; then
+  #         DOCKER_DEFAULT_PLATFORM=linux/arm64 sudo -E python ./main.py --image $IMAGE -f docker_image_filelist.txt -s docker-image
+  #       fi
 
-  scan-images:
-    name: Scan Images - ${{ matrix.label }}
-    needs: [metadata, build-images]
-    runs-on: ubuntu-24.04
-    timeout-minutes: ${{ fromJSON(vars.GHA_DEFAULT_TIMEOUT) }}
-    if: |-
-      always()
-      && vars.DISABLE_SCA_SCAN == 'false'
-      && fromJSON(needs.metadata.outputs.matrix)['scan-vulnerabilities'] != ''
-      && needs.build-images.result == 'success'
-      && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'))
-    strategy:
-      fail-fast: false
-      matrix:
-        include: "${{ fromJSON(needs.metadata.outputs.matrix)['scan-vulnerabilities'] }}"
-    env:
-      IMAGE: ${{ needs.metadata.outputs.prerelease-docker-repository }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
-    steps:
-    - name: Install regctl
-      uses: regclient/actions/regctl-installer@ce5fd131e371ffcdd7508b478cb223b3511a9183
+  # scan-images:
+  #   name: Scan Images - ${{ matrix.label }}
+  #   needs: [metadata, build-images]
+  #   runs-on: ubuntu-24.04
+  #   timeout-minutes: ${{ fromJSON(vars.GHA_DEFAULT_TIMEOUT) }}
+  #   if: |-
+  #     always()
+  #     && vars.DISABLE_SCA_SCAN == 'false'
+  #     && fromJSON(needs.metadata.outputs.matrix)['scan-vulnerabilities'] != ''
+  #     && needs.build-images.result == 'success'
+  #     && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'))
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include: "${{ fromJSON(needs.metadata.outputs.matrix)['scan-vulnerabilities'] }}"
+  #   env:
+  #     IMAGE: ${{ needs.metadata.outputs.prerelease-docker-repository }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
+  #   steps:
+  #   - name: Install regctl
+  #     uses: regclient/actions/regctl-installer@ce5fd131e371ffcdd7508b478cb223b3511a9183
 
-    - name: Login to Docker Hub
-      if: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN }}
-      uses: docker/login-action@e92390c5fb421da1463c202d546fed0ec5c39f20 # v2.1.0
-      with:
-        username: ${{ secrets.GHA_DOCKERHUB_PUSH_USER }}
-        password: ${{ secrets.GHA_KONG_ORG_DOCKERHUB_PUSH_TOKEN }}
+  #   - name: Login to Docker Hub
+  #     if: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN }}
+  #     uses: docker/login-action@e92390c5fb421da1463c202d546fed0ec5c39f20 # v2.1.0
+  #     with:
+  #       username: ${{ secrets.GHA_DOCKERHUB_PUSH_USER }}
+  #       password: ${{ secrets.GHA_KONG_ORG_DOCKERHUB_PUSH_TOKEN }}
 
-    # TODO: Refactor matrix file to support and parse platforms specific to distro
-    # Workaround: Look for specific amd64 and arm64  hardcooded architectures
-    - name: Parse Architecture Specific Image Manifest Digests
-      id: image_manifest_metadata
-      run: |
-        manifest_list_exists="$(
-          if regctl manifest get "${IMAGE}" --format raw-body --require-list -v panic &> /dev/null; then
-            echo true
-          else
-            echo false
-          fi
-        )"
-        echo "manifest_list_exists=$manifest_list_exists"
-        echo "manifest_list_exists=$manifest_list_exists" >> $GITHUB_OUTPUT
+  #   # TODO: Refactor matrix file to support and parse platforms specific to distro
+  #   # Workaround: Look for specific amd64 and arm64  hardcooded architectures
+  #   - name: Parse Architecture Specific Image Manifest Digests
+  #     id: image_manifest_metadata
+  #     run: |
+  #       manifest_list_exists="$(
+  #         if regctl manifest get "${IMAGE}" --format raw-body --require-list -v panic &> /dev/null; then
+  #           echo true
+  #         else
+  #           echo false
+  #         fi
+  #       )"
+  #       echo "manifest_list_exists=$manifest_list_exists"
+  #       echo "manifest_list_exists=$manifest_list_exists" >> $GITHUB_OUTPUT
 
-        amd64_sha="$(regctl image digest "${IMAGE}" --platform linux/amd64 || echo '')"
-        arm64_sha="$(regctl image digest "${IMAGE}" --platform linux/arm64 || echo '')"
-        echo "amd64_sha=$amd64_sha"
-        echo "amd64_sha=$amd64_sha" >> $GITHUB_OUTPUT
-        echo "arm64_sha=$arm64_sha"
-        echo "arm64_sha=$arm64_sha" >> $GITHUB_OUTPUT
+  #       amd64_sha="$(regctl image digest "${IMAGE}" --platform linux/amd64 || echo '')"
+  #       arm64_sha="$(regctl image digest "${IMAGE}" --platform linux/arm64 || echo '')"
+  #       echo "amd64_sha=$amd64_sha"
+  #       echo "amd64_sha=$amd64_sha" >> $GITHUB_OUTPUT
+  #       echo "arm64_sha=$arm64_sha"
+  #       echo "arm64_sha=$arm64_sha" >> $GITHUB_OUTPUT
 
-    - name: Scan AMD64 Image digest
-      id: sbom_action_amd64
-      if: steps.image_manifest_metadata.outputs.amd64_sha != ''
-      uses: Kong/public-shared-actions/security-actions/scan-docker-image@a5b1cfac7d55d8cf9390456a1e6799425e28840d # v4.0.1
-      with:
-        asset_prefix: kong-${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}-linux-amd64
-        image: ${{ needs.metadata.outputs.prerelease-docker-repository }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
-        skip_cis_scan: true # FIXME
+  #   - name: Scan AMD64 Image digest
+  #     id: sbom_action_amd64
+  #     if: steps.image_manifest_metadata.outputs.amd64_sha != ''
+  #     uses: Kong/public-shared-actions/security-actions/scan-docker-image@a5b1cfac7d55d8cf9390456a1e6799425e28840d # v4.0.1
+  #     with:
+  #       asset_prefix: kong-${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}-linux-amd64
+  #       image: ${{ needs.metadata.outputs.prerelease-docker-repository }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
+  #       skip_cis_scan: true # FIXME
 
-    - name: Scan ARM64 Image digest
-      if: steps.image_manifest_metadata.outputs.manifest_list_exists == 'true' && steps.image_manifest_metadata.outputs.arm64_sha != ''
-      id: sbom_action_arm64
-      uses: Kong/public-shared-actions/security-actions/scan-docker-image@a5b1cfac7d55d8cf9390456a1e6799425e28840d # v4.0.1
-      with:
-        asset_prefix: kong-${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}-linux-arm64
-        image: ${{ needs.metadata.outputs.prerelease-docker-repository }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
-        skip_cis_scan: true # FIXME
+  #   - name: Scan ARM64 Image digest
+  #     if: steps.image_manifest_metadata.outputs.manifest_list_exists == 'true' && steps.image_manifest_metadata.outputs.arm64_sha != ''
+  #     id: sbom_action_arm64
+  #     uses: Kong/public-shared-actions/security-actions/scan-docker-image@a5b1cfac7d55d8cf9390456a1e6799425e28840d # v4.0.1
+  #     with:
+  #       asset_prefix: kong-${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}-linux-arm64
+  #       image: ${{ needs.metadata.outputs.prerelease-docker-repository }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
+  #       skip_cis_scan: true # FIXME
 
-  release-packages:
-    name: Release Packages - ${{ matrix.label }} - ${{ needs.metadata.outputs.release-desc }}
-    needs: [metadata, build-packages, build-images]
-    runs-on: ubuntu-24.04
-    if: fromJSON(needs.metadata.outputs.matrix)['release-packages'] != ''
-    timeout-minutes: 5 # PULP takes a while to publish
-    environment: release
+  # release-packages:
+  #   name: Release Packages - ${{ matrix.label }} - ${{ needs.metadata.outputs.release-desc }}
+  #   needs: [metadata, build-packages, build-images]
+  #   runs-on: ubuntu-24.04
+  #   if: fromJSON(needs.metadata.outputs.matrix)['release-packages'] != ''
+  #   timeout-minutes: 5 # PULP takes a while to publish
+  #   environment: release
 
-    strategy:
-      # limit to 3 jobs at a time
-      max-parallel: 3
-      fail-fast: false
-      matrix:
-        include: "${{ fromJSON(needs.metadata.outputs.matrix)['release-packages'] }}"
+  #   strategy:
+  #     # limit to 3 jobs at a time
+  #     max-parallel: 3
+  #     fail-fast: false
+  #     matrix:
+  #       include: "${{ fromJSON(needs.metadata.outputs.matrix)['release-packages'] }}"
 
-    steps:
-    - uses: actions/checkout@v4
+  #   steps:
+  #   - uses: actions/checkout@v4
 
-    - name: Download artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: ${{ matrix.artifact-from }}-packages
-        path: bazel-bin/pkg
+  #   - name: Download artifact
+  #     uses: actions/download-artifact@v4
+  #     with:
+  #       name: ${{ matrix.artifact-from }}-packages
+  #       path: bazel-bin/pkg
 
-    - name: Set package architecture
-      id: pkg-arch
-      run: |
-        arch='amd64'
-        if [[ '${{ matrix.label }}' == *'arm64' ]]; then
-          arch='arm64'
-        fi
-        echo "arch=$arch"
-        echo "arch=$arch" >> $GITHUB_OUTPUT
+  #   - name: Set package architecture
+  #     id: pkg-arch
+  #     run: |
+  #       arch='amd64'
+  #       if [[ '${{ matrix.label }}' == *'arm64' ]]; then
+  #         arch='arm64'
+  #       fi
+  #       echo "arch=$arch"
+  #       echo "arch=$arch" >> $GITHUB_OUTPUT
 
-    - name: Upload Packages
-      env:
-        ARCHITECTURE: ${{ steps.pkg-arch.outputs.arch }}
-        OFFICIAL_RELEASE: ${{ github.event.inputs.official }}
-        ARTIFACT_VERSION: ${{ matrix.artifact-version }}
-        ARTIFACT_TYPE: ${{ matrix.artifact-type }}
-        ARTIFACT: ${{ matrix.artifact }}
-        INPUT_VERSION: ${{ github.event.inputs.version }}
-        PACKAGE_TYPE: ${{ matrix.package }}
-        KONG_RELEASE_LABEL: ${{ needs.metadata.outputs.release-label }}
-        VERBOSE: ${{ runner.debug == '1' && '1' || '' }}
-        CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
-        CLOUDSMITH_DRY_RUN: ''
-        IGNORE_CLOUDSMITH_FAILURES: ${{ vars.IGNORE_CLOUDSMITH_FAILURES }}
-        USE_CLOUDSMITH: ${{ vars.USE_CLOUDSMITH }}
-      run: |
-        sha256sum bazel-bin/pkg/*
+  #   - name: Upload Packages
+  #     env:
+  #       ARCHITECTURE: ${{ steps.pkg-arch.outputs.arch }}
+  #       OFFICIAL_RELEASE: ${{ github.event.inputs.official }}
+  #       ARTIFACT_VERSION: ${{ matrix.artifact-version }}
+  #       ARTIFACT_TYPE: ${{ matrix.artifact-type }}
+  #       ARTIFACT: ${{ matrix.artifact }}
+  #       INPUT_VERSION: ${{ github.event.inputs.version }}
+  #       PACKAGE_TYPE: ${{ matrix.package }}
+  #       KONG_RELEASE_LABEL: ${{ needs.metadata.outputs.release-label }}
+  #       VERBOSE: ${{ runner.debug == '1' && '1' || '' }}
+  #       CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+  #       CLOUDSMITH_DRY_RUN: ''
+  #       IGNORE_CLOUDSMITH_FAILURES: ${{ vars.IGNORE_CLOUDSMITH_FAILURES }}
+  #       USE_CLOUDSMITH: ${{ vars.USE_CLOUDSMITH }}
+  #     run: |
+  #       sha256sum bazel-bin/pkg/*
 
-        # set the version input as tags passed to release-scripts
-        # note: release-scripts rejects user tags if missing internal flag
-        #
-        # this can be a comma-sepratated list of tags to apply
-        if [[ "$OFFICIAL_RELEASE" == 'false' ]]; then
-          if echo "$INPUT_VERSION" | grep -qs -E 'rc|alpha|beta|nightly'; then
-            PACKAGE_TAGS="$INPUT_VERSION"
-            export PACKAGE_TAGS
-          fi
-        fi
+  #       # set the version input as tags passed to release-scripts
+  #       # note: release-scripts rejects user tags if missing internal flag
+  #       #
+  #       # this can be a comma-sepratated list of tags to apply
+  #       if [[ "$OFFICIAL_RELEASE" == 'false' ]]; then
+  #         if echo "$INPUT_VERSION" | grep -qs -E 'rc|alpha|beta|nightly'; then
+  #           PACKAGE_TAGS="$INPUT_VERSION"
+  #           export PACKAGE_TAGS
+  #         fi
+  #       fi
 
-        scripts/release-kong.sh
+  #       scripts/release-kong.sh
 
-  release-images:
-    name: Release Images - ${{ matrix.label }} - ${{ needs.metadata.outputs.release-desc }}
-    needs: [metadata, build-images]
-    runs-on: ubuntu-24.04
-    if: fromJSON(needs.metadata.outputs.matrix)['release-images'] != ''
+  # release-images:
+  #   name: Release Images - ${{ matrix.label }} - ${{ needs.metadata.outputs.release-desc }}
+  #   needs: [metadata, build-images]
+  #   runs-on: ubuntu-24.04
+  #   if: fromJSON(needs.metadata.outputs.matrix)['release-images'] != ''
 
-    strategy:
-      # limit to 3 jobs at a time
-      max-parallel: 3
-      fail-fast: false
-      matrix:
-        include: "${{ fromJSON(needs.metadata.outputs.matrix)['release-images'] }}"
+  #   strategy:
+  #     # limit to 3 jobs at a time
+  #     max-parallel: 3
+  #     fail-fast: false
+  #     matrix:
+  #       include: "${{ fromJSON(needs.metadata.outputs.matrix)['release-images'] }}"
 
-    steps:
-    - name: Login to Docker Hub
-      if: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN == 'true' }}
-      uses: docker/login-action@e92390c5fb421da1463c202d546fed0ec5c39f20 # v2.1.0
-      with:
-        username: ${{ secrets.GHA_DOCKERHUB_PUSH_USER }}
-        password: ${{ secrets.GHA_KONG_ORG_DOCKERHUB_PUSH_TOKEN }}
+  #   steps:
+  #   - name: Login to Docker Hub
+  #     if: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN == 'true' }}
+  #     uses: docker/login-action@e92390c5fb421da1463c202d546fed0ec5c39f20 # v2.1.0
+  #     with:
+  #       username: ${{ secrets.GHA_DOCKERHUB_PUSH_USER }}
+  #       password: ${{ secrets.GHA_KONG_ORG_DOCKERHUB_PUSH_TOKEN }}
 
-    - uses: actions/checkout@v4
+  #   - uses: actions/checkout@v4
 
-    - name: Get latest commit SHA on master
-      run: |
-        echo "latest_sha=$(git ls-remote origin -h refs/heads/master | cut -f1)" >> $GITHUB_ENV
+  #   - name: Get latest commit SHA on master
+  #     run: |
+  #       echo "latest_sha=$(git ls-remote origin -h refs/heads/master | cut -f1)" >> $GITHUB_ENV
 
-    - name: Docker meta
-      id: meta
-      uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5
-      with:
-        images: ${{ needs.metadata.outputs.docker-repository }}
-        sep-tags: " "
-        tags: |
-          type=raw,value=latest,enable=${{ matrix.label == 'ubuntu' && github.ref_name == 'master' && env.latest_sha == needs.metadata.outputs.commit-sha }}
-          type=match,enable=${{ github.event_name == 'workflow_dispatch' }},pattern=^\d+\.\d+,value=${{ github.event.inputs.version }}
-          type=match,enable=${{ github.event_name == 'workflow_dispatch' && matrix.label == 'ubuntu' }},pattern=^\d+\.\d+,value=${{ github.event.inputs.version }},suffix=
-          type=raw,enable=${{ github.event_name == 'workflow_dispatch' }},${{ github.event.inputs.version }}
-          type=raw,enable=${{ github.event_name == 'workflow_dispatch' && matrix.label == 'ubuntu' }},${{ github.event.inputs.version }},suffix=
-          type=ref,event=branch
-          type=ref,enable=${{ matrix.label == 'ubuntu' }},event=branch,suffix=
-          type=ref,event=tag
-          type=ref,enable=${{ matrix.label == 'ubuntu' }},event=tag,suffix=
-          type=ref,event=pr
-          type=schedule,pattern=nightly
-          type=schedule,enable=${{ matrix.label == 'ubuntu' }},pattern=nightly,suffix=
-          type=schedule,pattern={{date 'YYYYMMDD'}}
-          type=schedule,enable=${{ matrix.label == 'ubuntu' }},pattern={{date 'YYYYMMDD'}},suffix=
-        flavor: |
-          latest=false
-          suffix=-${{ matrix.label }}
+  #   - name: Docker meta
+  #     id: meta
+  #     uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5
+  #     with:
+  #       images: ${{ needs.metadata.outputs.docker-repository }}
+  #       sep-tags: " "
+  #       tags: |
+  #         type=raw,value=latest,enable=${{ matrix.label == 'ubuntu' && github.ref_name == 'master' && env.latest_sha == needs.metadata.outputs.commit-sha }}
+  #         type=match,enable=${{ github.event_name == 'workflow_dispatch' }},pattern=^\d+\.\d+,value=${{ github.event.inputs.version }}
+  #         type=match,enable=${{ github.event_name == 'workflow_dispatch' && matrix.label == 'ubuntu' }},pattern=^\d+\.\d+,value=${{ github.event.inputs.version }},suffix=
+  #         type=raw,enable=${{ github.event_name == 'workflow_dispatch' }},${{ github.event.inputs.version }}
+  #         type=raw,enable=${{ github.event_name == 'workflow_dispatch' && matrix.label == 'ubuntu' }},${{ github.event.inputs.version }},suffix=
+  #         type=ref,event=branch
+  #         type=ref,enable=${{ matrix.label == 'ubuntu' }},event=branch,suffix=
+  #         type=ref,event=tag
+  #         type=ref,enable=${{ matrix.label == 'ubuntu' }},event=tag,suffix=
+  #         type=ref,event=pr
+  #         type=schedule,pattern=nightly
+  #         type=schedule,enable=${{ matrix.label == 'ubuntu' }},pattern=nightly,suffix=
+  #         type=schedule,pattern={{date 'YYYYMMDD'}}
+  #         type=schedule,enable=${{ matrix.label == 'ubuntu' }},pattern={{date 'YYYYMMDD'}},suffix=
+  #       flavor: |
+  #         latest=false
+  #         suffix=-${{ matrix.label }}
 
-    - name: Install regctl
-      uses: regclient/actions/regctl-installer@b6614f5f56245066b533343a85f4109bdc38c8cc
+  #   - name: Install regctl
+  #     uses: regclient/actions/regctl-installer@b6614f5f56245066b533343a85f4109bdc38c8cc
 
-    - name: Push Images
-      if: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN == 'true' }}
-      env:
-        TAGS: "${{ steps.meta.outputs.tags }}"
-      run: |
-        PRERELEASE_IMAGE=${{ env.PRERELEASE_DOCKER_REPOSITORY }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
-        docker pull $PRERELEASE_IMAGE
-        for tag in $TAGS; do
-          regctl -v debug image copy $PRERELEASE_IMAGE $tag
-        done
+  #   - name: Push Images
+  #     if: ${{ env.HAS_ACCESS_TO_GITHUB_TOKEN == 'true' }}
+  #     env:
+  #       TAGS: "${{ steps.meta.outputs.tags }}"
+  #     run: |
+  #       PRERELEASE_IMAGE=${{ env.PRERELEASE_DOCKER_REPOSITORY }}:${{ needs.metadata.outputs.commit-sha }}-${{ matrix.label }}
+  #       docker pull $PRERELEASE_IMAGE
+  #       for tag in $TAGS; do
+  #         regctl -v debug image copy $PRERELEASE_IMAGE $tag
+  #       done
