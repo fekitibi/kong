@@ -265,15 +265,15 @@ jobs:
         path: bazel-bin/pkg
         retention-days: 3
 
-  verify-manifest-packages:
-    needs: [metadata, build-packages]
-    name: Verify Manifest - Package ${{ matrix.label }}
-    runs-on: ubuntu-24.04
+  # verify-manifest-packages:
+  #   needs: [metadata, build-packages]
+  #   name: Verify Manifest - Package ${{ matrix.label }}
+  #   runs-on: ubuntu-24.04
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include: "${{ fromJSON(needs.metadata.outputs.matrix)['build-packages'] }}"
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include: "${{ fromJSON(needs.metadata.outputs.matrix)['build-packages'] }}"
 
   #   steps:
   #   - uses: actions/checkout@v4
