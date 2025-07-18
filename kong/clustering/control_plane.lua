@@ -10,6 +10,7 @@ local constants = require("kong.constants")
 local events = require("kong.clustering.events")
 local calculate_config_hash = require("kong.clustering.config_helper").calculate_config_hash
 local EMPTY = require("kong.tools.table").EMPTY
+local filters = require("kong.clustering.filters")
 
 
 local string = string
@@ -140,6 +141,7 @@ function _M:export_deflated_reconfigure_payload()
   }
 
   self.reconfigure_payload = payload
+  self.full_config_table = config_table -- Store full config for filtering
 
   payload, err = json_encode(payload)
   if not payload then
@@ -160,6 +162,105 @@ function _M:export_deflated_reconfigure_payload()
   self.deflated_reconfigure_payload = payload
 
   return payload, nil, config_hash
+end
+
+-- New function to export filtered config for a specific DP
+function _M:export_filtered_config_for_dp(dp_id, dp_metadata)
+  if not self.full_config_table then
+    local _, err = self:export_deflated_reconfigure_payload()
+    if err then
+      return nil, err
+    end
+  end
+
+  local dp_filters = filters.parse_dp_filters(dp_metadata)
+  local filtered_config = filters.filter_config_for_dp(self.full_config_table, dp_filters)
+
+  local config_hash, hashes = calculate_config_hash(filtered_config)
+
+  -- Check if we have a cached version for this DP
+  local cached = filters.get_cached_dp_config(dp_id)
+  if cached and cached.hash == config_hash then
+    return cached.config, nil, config_hash, true -- Cache hit
+  end
+
+  local payload = {
+    type = "reconfigure",
+    timestamp = ngx_now(),
+    config_table = filtered_config,
+    config_hash = config_hash,
+    hashes = hashes,
+    dp_id = dp_id,
+    filtered = true,
+  }
+
+  local encoded_payload, err = json_encode(payload)
+  if not encoded_payload then
+    return nil, err
+  end
+
+  yield()
+
+  local deflated_payload, err = deflate_gzip(encoded_payload)
+  if not deflated_payload then
+    return nil, err
+  end
+
+  yield()
+
+  -- Cache the result
+  filters.set_cached_dp_config(dp_id, deflated_payload, config_hash)
+
+  return deflated_payload, nil, config_hash, false -- Cache miss
+end
+
+-- New function to export incremental delta for a specific DP
+function _M:export_delta_for_dp(dp_id, dp_metadata)
+  if not self.full_config_table then
+    local _, err = self:export_deflated_reconfigure_payload()
+    if err then
+      return nil, err
+    end
+  end
+
+  local cached = filters.get_cached_dp_config(dp_id)
+  if not cached then
+    -- No cached config, send full config
+    return self:export_filtered_config_for_dp(dp_id, dp_metadata)
+  end
+
+  local dp_filters = filters.parse_dp_filters(dp_metadata)
+  local old_config_table = cached.config_table or {}
+  local delta = filters.calculate_dp_delta(dp_id, self.full_config_table, old_config_table, dp_filters)
+
+  if filters.is_delta_empty(delta) then
+    return nil, nil, cached.hash, true -- No changes
+  end
+
+  local payload = {
+    type = "delta",
+    timestamp = ngx_now(),
+    delta = delta,
+    config_hash = filters.calculate_filtered_hash(self.full_config_table, dp_filters),
+    dp_id = dp_id,
+    incremental = true,
+  }
+
+  local encoded_payload, err = json_encode(payload)
+  if not encoded_payload then
+    return nil, err
+  end
+
+  yield()
+
+  local deflated_payload, err = deflate_gzip(encoded_payload)
+  if not deflated_payload then
+    return nil, err
+  end
+
+  yield()
+
+  return deflated_payload, nil, payload.config_hash, false
 end
 
 
@@ -454,37 +555,88 @@ function _M:handle_cp_websocket(cert)
         goto continue
       end
 
-      ok, err = check_mixed_route_entities(self.reconfigure_payload, dp_version,
-                                           kong and kong.configuration and
-                                           kong.configuration.router_flavor)
-      if not ok then
-        ngx_log(ngx_WARN, _log_prefix, "unable to send updated configuration to data plane: ", err, log_suffix)
+      -- Check if this DP supports filtered sync
+      local supports_filtered_sync = data.capabilities and
+                                    data.capabilities["kong.sync.filter"] == true
 
+      local deflated_payload
+      local config_hash_sent
+      local is_cached = false
+
+      if supports_filtered_sync and data.filters then
+        -- Use new filtered sync
+        local dp_metadata = {
+          filters = data.filters,
+          capabilities = data.capabilities,
+          version = dp_version,
+          id = dp_id,
+        }
+
+        -- Try incremental sync first
+        deflated_payload, err, config_hash_sent, is_cached = self:export_delta_for_dp(dp_id, dp_metadata)
+
+        if not deflated_payload and not is_cached then
+          -- Fall back to full filtered config
+          deflated_payload, err, config_hash_sent, is_cached = self:export_filtered_config_for_dp(dp_id, dp_metadata)
+        end
+
+        if is_cached then
+          ngx_log(ngx_DEBUG, _log_prefix, "config unchanged for data plane, skipping sync", log_suffix)
+          goto continue
+        end
+
+        if deflated_payload then
+          ngx_log(ngx_DEBUG, _log_prefix, "sending filtered config to data plane", log_suffix)
+        end
+      else
+        -- Fall back to legacy full sync
+        ok, err = check_mixed_route_entities(self.reconfigure_payload, dp_version,
+                                             kong and kong.configuration and
+                                             kong.configuration.router_flavor)
+        if not ok then
+          ngx_log(ngx_WARN, _log_prefix, "unable to send updated configuration to data plane: ", err, log_suffix)
+          goto continue
+        end
+
+        local _, compat_payload, compat_err = update_compatible_payload(self.reconfigure_payload, dp_version, log_suffix)
+
+        if not compat_payload then -- no modification or err, use the cached payload
+          deflated_payload = self.deflated_reconfigure_payload
+        else
+          deflated_payload = compat_payload
+        end
+
+        if compat_err then
+          ngx_log(ngx_WARN, "unable to update compatible payload: ", compat_err, ", the unmodified config ",
+                            "is returned", log_suffix)
+        end
+
+        config_hash_sent = self.current_config_hash
+        ngx_log(ngx_DEBUG, _log_prefix, "sending full config to data plane (legacy sync)", log_suffix)
+      end
+
+      if not deflated_payload then
+        ngx_log(ngx_ERR, _log_prefix, "failed to generate config payload: ", err or "unknown error", log_suffix)
         goto continue
       end
 
-      local _, deflated_payload, err = update_compatible_payload(self.reconfigure_payload, dp_version, log_suffix)
-
-      if not deflated_payload then -- no modification or err, use the cached payload
-        deflated_payload = self.deflated_reconfigure_payload
-      end
-
-      if err then
-        ngx_log(ngx_WARN, "unable to update compatible payload: ", err, ", the unmodified config ",
-                          "is returned", log_suffix)
-      end
-
       -- config update
-      local _, err = wb:send_binary(deflated_payload)
-      if err then
-        if not is_timeout(err) then
-          return nil, "unable to send updated configuration to data plane: " .. err
+      local _, send_err = wb:send_binary(deflated_payload)
+      if send_err then
+        if not is_timeout(send_err) then
+          return nil, "unable to send updated configuration to data plane: " .. send_err
         end
 
-        ngx_log(ngx_NOTICE, _log_prefix, "unable to send updated configuration to data plane: ", err, log_suffix)
+        ngx_log(ngx_NOTICE, _log_prefix, "unable to send updated configuration to data plane: ", send_err, log_suffix)
 
       else
-        ngx_log(ngx_DEBUG, _log_prefix, "sent config update to data plane", log_suffix)
+        -- Update config hash if we successfully sent
+        if config_hash_sent then
+          config_hash = config_hash_sent
+        end
+
+        local sync_type = supports_filtered_sync and "filtered" or "full"
+        ngx_log(ngx_DEBUG, _log_prefix, "sent ", sync_type, " config update to data plane", log_suffix)
       end
 
       ::continue::

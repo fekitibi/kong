@@ -48,29 +48,123 @@ function _M.new(clustering)
          "kong.clustering is not instantiated")
 
   assert(type(clustering.conf) == "table",
-         "kong.clustering did not provide configuration")
-
-  assert(type(clustering.cert) == "table",
-         "kong.clustering did not provide the cluster certificate")
-
-  assert(type(clustering.cert_key) == "cdata",
-         "kong.clustering did not provide the cluster certificate private key")
-
-  assert(kong.db.declarative_config,
-         "kong.db.declarative_config was not initialized")
+         "kong.clustering.conf is not a table")
 
   local self = {
-    declarative_config = kong.db.declarative_config,
     conf = clustering.conf,
-    cert = clustering.cert,
-    cert_key = clustering.cert_key,
-
-    -- in konnect_mode, reconfigure errors will be reported to the control plane
-    -- via WebSocket message
+    declarative_config = clustering.declarative_config,
     error_reporting = clustering.conf.konnect_mode,
+    full_sync_request = false,  -- Track if full sync was requested
   }
 
   return setmetatable(self, _MT)
+end
+
+-- Apply delta updates to current configuration
+function _M:apply_delta_update(current_config, delta)
+  local updated_config = {}
+
+  -- Deep copy current config
+  for entity_type, entities in pairs(current_config) do
+    if type(entities) == "table" and #entities > 0 then
+      updated_config[entity_type] = {}
+      for _, entity in ipairs(entities) do
+        table.insert(updated_config[entity_type], entity)
+      end
+    else
+      updated_config[entity_type] = entities
+    end
+  end
+
+  -- Apply additions
+  if delta.added then
+    for entity_type, entities in pairs(delta.added) do
+      if not updated_config[entity_type] then
+        updated_config[entity_type] = {}
+      end
+
+      for _, entity in ipairs(entities) do
+        table.insert(updated_config[entity_type], entity)
+      end
+    end
+  end
+
+  -- Apply updates
+  if delta.updated then
+    for entity_type, entities in pairs(delta.updated) do
+      if updated_config[entity_type] then
+        local entity_map = {}
+
+        -- Create lookup map
+        for i, entity in ipairs(updated_config[entity_type]) do
+          if entity.id then
+            entity_map[entity.id] = i
+          end
+        end
+
+        -- Apply updates
+        for _, updated_entity in ipairs(entities) do
+          if updated_entity.id and entity_map[updated_entity.id] then
+            updated_config[entity_type][entity_map[updated_entity.id]] = updated_entity
+          end
+        end
+      end
+    end
+  end
+
+  -- Apply removals
+  if delta.removed then
+    for entity_type, entities in pairs(delta.removed) do
+      if updated_config[entity_type] then
+        local remove_ids = {}
+
+        -- Collect IDs to remove
+        for _, entity in ipairs(entities) do
+          if entity.id then
+            remove_ids[entity.id] = true
+          end
+        end
+
+        -- Filter out removed entities
+        local filtered_entities = {}
+        for _, entity in ipairs(updated_config[entity_type]) do
+          if not entity.id or not remove_ids[entity.id] then
+            table.insert(filtered_entities, entity)
+          end
+        end
+
+        updated_config[entity_type] = filtered_entities
+      end
+    end
+  end
+
+  return updated_config, nil
+end
+
+-- Request full sync from control plane
+function _M:request_full_sync()
+  self.full_sync_request = true
+  ngx_log(ngx_NOTICE, _log_prefix, "requesting full configuration sync from control plane")
+end
+
+-- Send full sync request message
+local function send_full_sync_request(c, log_suffix)
+  local request_msg = {
+    type = "request_full_sync",
+    timestamp = ngx_time()
+  }
+
+  local request_json = json_encode(request_msg)
+  local request_compressed = require("kong.tools.gzip").deflate_gzip(request_json)
+
+  local ok, err = c:send_binary(request_compressed)
+  if not ok then
+    ngx_log(ngx_ERR, _log_prefix, "failed to send full sync request: ", err, log_suffix)
+    return false, err
+  end
+
+  ngx_log(ngx_DEBUG, _log_prefix, "sent full sync request to control plane", log_suffix)
+  return true
 end
 
 
@@ -236,12 +330,19 @@ function _M:communicate(premature)
   -- first, send out the plugin list and DP labels to CP
   -- The CP will make the decision on whether sync will be allowed
   -- based on the received information
+  local capabilities = {
+    ["kong.sync.filter"] = true,  -- Advertise filter sync support
+    ["kong.sync.delta"] = true,   -- Advertise delta sync support
+    ["kong.sync.v2"] = true,      -- Advertise v2 sync support
+  }
+
   local _
   _, err = c:send_binary(json_encode({ type = "basic_info",
                                        plugins = self.plugins_list,
                                        process_conf = configuration,
                                        filters = self.filters,
-                                       labels = labels, }))
+                                       labels = labels,
+                                       capabilities = capabilities, }))
   if err then
     set_control_plane_connected(false)
     ngx_log(ngx_ERR, _log_prefix, "unable to send basic information to control plane: ", uri,
@@ -301,25 +402,65 @@ function _M:communicate(premature)
       msg = assert(json_decode(msg))
       yield()
 
-      if msg.type ~= "reconfigure" then
+      if msg.type ~= "reconfigure" and msg.type ~= "delta" then
         goto continue
       end
 
-      ngx_log(ngx_DEBUG, _log_prefix, "received reconfigure frame from control plane",
-                         msg.timestamp and " with timestamp: " .. msg.timestamp or "",
-                         log_suffix)
+      if msg.type == "reconfigure" then
+        ngx_log(ngx_DEBUG, _log_prefix, "received reconfigure frame from control plane",
+                           msg.timestamp and " with timestamp: " .. msg.timestamp or "",
+                           msg.filtered and " (filtered)" or " (full)",
+                           log_suffix)
 
-      local err_t
-      ok, err, err_t = config_helper.update(self.declarative_config, msg)
+        local err_t
+        ok, err, err_t = config_helper.update(self.declarative_config, msg)
 
-      if ok then
-        ping_immediately = true
-
-      else
-        if self.error_reporting then
-          config_err_t = err_t
+        if ok then
+          ping_immediately = true
+        else
+          if self.error_reporting then
+            config_err_t = err_t
+          end
+          ngx_log(ngx_ERR, _log_prefix, "unable to update running config: ", err)
         end
-        ngx_log(ngx_ERR, _log_prefix, "unable to update running config: ", err)
+
+      elseif msg.type == "delta" then
+        ngx_log(ngx_DEBUG, _log_prefix, "received delta frame from control plane",
+                           msg.timestamp and " with timestamp: " .. msg.timestamp or "",
+                           log_suffix)
+
+        -- Apply delta update
+        local current_config = self.declarative_config:get_current_config() or {}
+        local updated_config, delta_err = self:apply_delta_update(current_config, msg.delta)
+
+        if updated_config then
+          -- Create a synthetic reconfigure message with the updated config
+          local synthetic_msg = {
+            type = "reconfigure",
+            timestamp = msg.timestamp,
+            config_table = updated_config,
+            config_hash = msg.config_hash,
+            hashes = msg.hashes,
+            incremental = true,
+          }
+
+          local err_t
+          ok, err, err_t = config_helper.update(self.declarative_config, synthetic_msg)
+
+          if ok then
+            ping_immediately = true
+            ngx_log(ngx_DEBUG, _log_prefix, "successfully applied delta update", log_suffix)
+          else
+            if self.error_reporting then
+              config_err_t = err_t
+            end
+            ngx_log(ngx_ERR, _log_prefix, "unable to apply delta update: ", err)
+          end
+        else
+          ngx_log(ngx_ERR, _log_prefix, "unable to process delta update: ", delta_err or "unknown error")
+          -- Request full sync
+          self:request_full_sync()
+        end
       end
 
       if next_data == data then
@@ -345,6 +486,14 @@ function _M:communicate(premature)
         local err_t = config_err_t
         config_err_t = nil
         send_error(c, err_t, log_suffix)
+      end
+
+      -- Handle full sync requests
+      if self.full_sync_request then
+        local ok = send_full_sync_request(c, log_suffix)
+        if ok then
+          self.full_sync_request = false
+        end
       end
 
       counter = counter - 1
