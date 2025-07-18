@@ -1,7 +1,16 @@
 local _M = {}
 
-local json_encode = require("cjson").encode
-local json_decode = require("cjson").decode
+-- Lazy-loaded JSON functions for build compatibility
+local json_encode, json_decode
+
+local function init_json()
+  if not json_encode then
+    local cjson = require("cjson")
+    json_encode = cjson.encode
+    json_decode = cjson.decode
+  end
+end
+
 local string_match = string.match
 local string_find = string.find
 local string_gsub = string.gsub
@@ -233,6 +242,8 @@ function _M.parse_dp_filters(dp_metadata)
   end
 
   if type(filter_config) == "string" then
+    -- Initialize JSON functions when needed
+    init_json()
     local ok, parsed = pcall(json_decode, filter_config)
     if ok then
       filter_config = parsed
@@ -434,6 +445,8 @@ end
 
 function _M.entities_equal(entity1, entity2)
   -- Simple comparison - in production you might want a more sophisticated approach
+  -- Initialize JSON functions when needed
+  init_json()
   local json1 = json_encode(entity1)
   local json2 = json_encode(entity2)
   return json1 == json2
