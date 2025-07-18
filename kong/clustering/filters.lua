@@ -463,7 +463,7 @@ function _M.set_cached_dp_config(dp_id, config, hash)
   dp_config_cache[dp_id] = {
     config = config,
     hash = hash,
-    timestamp = ngx.time()
+    timestamp = ngx and ngx.time and ngx.time() or os.time()
   }
 end
 
