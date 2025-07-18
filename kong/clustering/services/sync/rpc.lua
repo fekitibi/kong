@@ -44,23 +44,31 @@ end
 
 
 local function empty_sync_result()
-  return { default = { deltas = {}, full_sync = false, }, }
+local function empty_sync_result(filter)
+  -- For filtered sync, return empty deltas but indicate filter used
+  return { default = { deltas = {}, full_sync = false, filter = filter }, }
+end
 end
 
 
 local function full_sync_result()
-  local deltas, err = declarative.export_config_sync()
-  if not deltas then
-    return nil, err
-  end
-
-  -- wipe dp lmdb, full sync
-  return { default = { deltas = deltas, full_sync = true, }, }
+local function empty_sync_result()
+  return { default = { deltas = {}, full_sync = false, }, }
 end
 
-
-local function get_current_version()
-  return declarative.get_current_hash() or DECLARATIVE_EMPTY_CONFIG_HASH
+local function full_sync_result(filter)
+  -- Fetch full config, apply filter, then export
+  local config_table, err = declarative.export_config_sync()
+  if not config_table then
+    return nil, err
+  end
+  if filter then
+    local config_filter = require("kong.tools.config_filter")
+    config_table = config_filter.filter_config(config_table, filter)
+  end
+  -- Now export filtered config as deltas
+  return { default = { deltas = config_table, full_sync = true, }, }
+end
 end
 
 
@@ -96,8 +104,9 @@ function _M:init_cp(manager)
       return nil, "default namespace does not exist inside params"
     end
 
-    -- { default = { version = "1000", }, }
+    -- { default = { version = "1000", filter = {...} }, }
     local default_namespace_version = default_namespace.version
+    local filter = default_namespace.filter
     local node_info = assert(kong.rpc:get_peer_info(node_id))
 
     -- follow update_sync_status() in control_plane.lua
@@ -124,9 +133,11 @@ function _M:init_cp(manager)
     --  string comparison effectively does the same as number comparison
     if not self.strategy:is_valid_version(default_namespace_version) or
        default_namespace_version ~= latest_version then
-      return full_sync_result()
+      -- Use filter for full sync result
+      return full_sync_result(filter)
     end
 
+    -- No deltas to sync
     return empty_sync_result()
   end)
 end
@@ -309,7 +320,9 @@ local function do_sync()
   end
 
   local current_version = get_current_version()
-  local msg = { default = { version = current_version, }, }
+  -- Example: get filter from DP config or env (customize as needed)
+  local filter = kong and kong.config and kong.config.sync_filter or nil
+  local msg = { default = { version = current_version, filter = filter }, }
 
   local ns_deltas, err = kong.rpc:call("control_plane", "kong.sync.v2.get_delta", msg)
   if not ns_deltas then

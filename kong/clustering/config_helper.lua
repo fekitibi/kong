@@ -1,3 +1,4 @@
+
 local constants = require("kong.constants")
 local declarative = require("kong.db.declarative")
 local tablepool = require("tablepool")
@@ -6,6 +7,7 @@ local isarray = require("table.isarray")
 local nkeys = require("table.nkeys")
 local buffer = require("string.buffer")
 local db_errors = require("kong.db.errors")
+local config_filter = require("kong.tools.config_filter")
 
 
 local tostring = tostring
@@ -141,18 +143,24 @@ local function calculate_hash(input, o)
 end
 
 
-local function calculate_config_hash(config_table)
+-- Accepts optional filter param, applies filtering before hash
+local function calculate_config_hash(config_table, filter)
   local o = buffer.new()
   if type(config_table) ~= "table" then
     local config_hash = calculate_hash(config_table, o)
     return config_hash, { config = config_hash, }
   end
 
-  local routes    = config_table.routes
-  local services  = config_table.services
-  local plugins   = config_table.plugins
-  local upstreams = config_table.upstreams
-  local targets   = config_table.targets
+  local filtered_config = config_table
+  if filter then
+    filtered_config = config_filter.filter_config(config_table, filter)
+  end
+
+  local routes    = filtered_config.routes
+  local services  = filtered_config.services
+  local plugins   = filtered_config.plugins
+  local upstreams = filtered_config.upstreams
+  local targets   = filtered_config.targets
 
   local routes_hash = calculate_hash(routes, o)
   local services_hash = calculate_hash(services, o)
@@ -160,13 +168,13 @@ local function calculate_config_hash(config_table)
   local upstreams_hash = calculate_hash(upstreams, o)
   local targets_hash = calculate_hash(targets, o)
 
-  config_table.routes    = nil
-  config_table.services  = nil
-  config_table.plugins   = nil
-  config_table.upstreams = nil
-  config_table.targets   = nil
+  filtered_config.routes    = nil
+  filtered_config.services  = nil
+  filtered_config.plugins   = nil
+  filtered_config.upstreams = nil
+  filtered_config.targets   = nil
 
-  local rest_hash = calculate_hash(config_table, o)
+  local rest_hash = calculate_hash(filtered_config, o)
   local config_hash = ngx_md5(routes_hash    ..
                               services_hash  ..
                               plugins_hash   ..
@@ -174,11 +182,11 @@ local function calculate_config_hash(config_table)
                               targets_hash   ..
                               rest_hash)
 
-  config_table.routes    = routes
-  config_table.services  = services
-  config_table.plugins   = plugins
-  config_table.upstreams = upstreams
-  config_table.targets   = targets
+  filtered_config.routes    = routes
+  filtered_config.services  = services
+  filtered_config.plugins   = plugins
+  filtered_config.upstreams = upstreams
+  filtered_config.targets   = targets
 
   return config_hash, {
     config    = config_hash,
@@ -349,6 +357,7 @@ local function update(declarative_config, msg)
       name = ERRORS.RELOAD,
       source = "kong.db.declarative.load_into_cache_with_events",
       message = err,
+      config_hash = msg.config_hash,
     }
 
     return nil, err, err_t

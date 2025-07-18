@@ -214,6 +214,8 @@ build = {
     ["kong.tools.redis.schema"] = "kong/tools/redis/schema.lua",
     ["kong.tools.aws_stream"] = "kong/tools/aws_stream.lua",
 
+    ["kong.tools.config_filter"] = "kong/tools/config_filter.lua",
+
     ["kong.tools.sandbox"] = "kong/tools/sandbox/init.lua",
     ["kong.tools.sandbox.kong"] = "kong/tools/sandbox/kong.lua",
     ["kong.tools.sandbox.environment"] = "kong/tools/sandbox/environment/init.lua",
