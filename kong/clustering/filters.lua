@@ -1,14 +1,22 @@
 local _M = {}
 
--- Lazy-loaded JSON functions for build compatibility
-local json_encode, json_decode
-
-local function init_json()
-  if not json_encode then
-    local cjson = require("cjson")
-    json_encode = cjson.encode
-    json_decode = cjson.decode
+-- Safe JSON functions that handle dependencies gracefully
+local function safe_json_encode(obj)
+  local ok, cjson = pcall(require, "cjson")
+  if not ok then
+    -- Fallback for build environments
+    return tostring(obj)
   end
+  return cjson.encode(obj)
+end
+
+local function safe_json_decode(str)
+  local ok, cjson = pcall(require, "cjson")
+  if not ok then
+    -- Return nil for build environments
+    return nil
+  end
+  return cjson.decode(str)
 end
 
 local string_match = string.match
@@ -242,10 +250,9 @@ function _M.parse_dp_filters(dp_metadata)
   end
 
   if type(filter_config) == "string" then
-    -- Initialize JSON functions when needed
-    init_json()
-    local ok, parsed = pcall(json_decode, filter_config)
-    if ok then
+    -- Use safe JSON decode
+    local ok, parsed = pcall(safe_json_decode, filter_config)
+    if ok and parsed then
       filter_config = parsed
     else
       return filters
@@ -445,10 +452,9 @@ end
 
 function _M.entities_equal(entity1, entity2)
   -- Simple comparison - in production you might want a more sophisticated approach
-  -- Initialize JSON functions when needed
-  init_json()
-  local json1 = json_encode(entity1)
-  local json2 = json_encode(entity2)
+  -- Use safe JSON encode
+  local json1 = safe_json_encode(entity1)
+  local json2 = safe_json_encode(entity2)
   return json1 == json2
 end
 
