@@ -441,11 +441,10 @@ end
 
 function _M.is_delta_empty(delta)
   local function table_empty(t)
-    if not t then return true end
-    for _ in pairs(t) do
-      return false
+    if not t then 
+      return true 
     end
-    return true
+    return next(t) == nil
   end
 
   return table_empty(delta.added) and

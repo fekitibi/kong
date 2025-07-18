@@ -561,7 +561,7 @@ function _M:handle_cp_websocket(cert)
 
       local deflated_payload
       local config_hash_sent
-      local is_cached = false
+      local is_cached
 
       if supports_filtered_sync and data.filters then
         -- Use new filtered sync
