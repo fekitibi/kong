@@ -162,7 +162,6 @@ end
 
 local function transform_headers(conf, template_env)
   local headers = get_headers()
-  local headers_to_remove = {}
 
   headers.host = nil
 
@@ -171,7 +170,6 @@ local function transform_headers(conf, template_env)
     name = name:lower()
     if headers[name] then
       headers[name] = nil
-      headers_to_remove[name] = true
     end
   end
 
@@ -180,15 +178,10 @@ local function transform_headers(conf, template_env)
     local lower_old_name, lower_new_name = old_name:lower(), new_name:lower()
     -- headers by default are case-insensitive
     -- but if we have a case change, we need to handle it as a special case
-    local need_remove
     if lower_old_name == lower_new_name then
-      need_remove = rename(headers, old_name, new_name)
+      rename(headers, old_name, new_name)
     else
-      need_remove = rename(headers, lower_old_name, lower_new_name)
-    end
-
-    if need_remove then
-      headers_to_remove[old_name] = true
+      rename(headers, lower_old_name, lower_new_name)
     end
   end
 
@@ -224,10 +217,7 @@ local function transform_headers(conf, template_env)
     headers[name] = append_value(headers[name], value)
   end
 
-  for name, _ in pairs(headers_to_remove) do
-    clear_header(name)
-  end
-
+  -- Removed NYI pairs() loop for clear_header; set_headers(headers) handles header removal
   set_headers(headers)
 end
 
