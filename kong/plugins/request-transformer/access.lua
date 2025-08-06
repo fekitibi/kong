@@ -162,6 +162,7 @@ end
 
 local function transform_headers(conf, template_env)
   local headers = get_headers()
+  local headers_to_remove = {}
 
   headers.host = nil
 
@@ -170,6 +171,7 @@ local function transform_headers(conf, template_env)
     name = name:lower()
     if headers[name] then
       headers[name] = nil
+      headers_to_remove[#headers_to_remove + 1] = name
     end
   end
 
@@ -217,7 +219,10 @@ local function transform_headers(conf, template_env)
     headers[name] = append_value(headers[name], value)
   end
 
-  -- Removed NYI pairs() loop for clear_header; set_headers(headers) handles header removal
+  for i = 1, #headers_to_remove do
+    clear_header(headers_to_remove[i])
+  end
+
   set_headers(headers)
 end
 
