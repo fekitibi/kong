@@ -79,19 +79,110 @@ local function res_cc()
 end
 
 
-local function cacheable_request(conf, cc)
-  -- TODO refactor these searches to O(1)
-  do
-    local method = kong.request.get_method()
-    local method_match = false
-    for i = 1, #conf.request_method do
-      if conf.request_method[i] == method then
-        method_match = true
-        break
+-- Build a set (hash) from an array-like table
+local function build_set(t)
+  local s = {}
+  for i = 1, #t do
+    s[t[i]] = true
+  end
+  return s
+end
+
+-- JIT-friendly in-place insertion sort for small arrays of strings
+local function isort(a)
+  for i = 2, #a do
+    local v = a[i]
+    local j = i - 1
+    while j >= 1 and a[j] > v do
+      a[j + 1] = a[j]
+      j = j - 1
+    end
+    a[j + 1] = v
+  end
+end
+
+-- Canonicalize MIME params to a stable key like "charset=utf-8;q=1"
+local function params_key(params)
+  if not params or nkeys(params) == 0 then
+    return ""
+  end
+  local keys, n = {}, 0
+  for k in pairs(params) do
+    n = n + 1
+    keys[n] = k
+  end
+  isort(keys)
+
+  local parts, m = {}, 0
+  for i = 1, n do
+    local k = keys[i]
+    m = m + 1
+    parts[m] = k .. "=" .. (params[k] or "")
+  end
+  return table.concat(parts, ";")
+end
+
+-- Precompute O(1) lookups on first use in this worker
+local function prepare_lookups(conf)
+  if conf._pc_prepared then
+    return
+  end
+
+  -- request methods and response codes
+  conf._pc_method_set  = build_set(conf.request_method)
+
+  local status_set = {}
+  for i = 1, #conf.response_code do
+    status_set[conf.response_code[i]] = true
+  end
+  conf._pc_status_set = status_set
+
+  -- content-type patterns:
+  -- store three maps:
+  --   exact[type][subtype][paramsKey] = true
+  --   type_wild[type][paramsKey]      = true      (matches type/* with exact params)
+  --   any[paramsKey]                  = true      (*/* with exact params)
+  local exact, type_wild, any = {}, {}, {}
+  for i = 1, #conf.content_type do
+    local exp_type, exp_subtype, exp_params = parse_mime_type(conf.content_type[i])
+    if exp_type then
+      local pkey = params_key(exp_params)
+      if exp_type == "*" and exp_subtype == "*" then
+        any[pkey] = true
+      elseif exp_subtype == "*" then
+        local tw = type_wild[exp_type]
+        if not tw then
+          tw = {}
+          type_wild[exp_type] = tw
+        end
+        tw[pkey] = true
+      else
+        local tmap = exact[exp_type]
+        if not tmap then
+          tmap = {}
+          exact[exp_type] = tmap
+        end
+        local smap = tmap[exp_subtype]
+        if not smap then
+          smap = {}
+          tmap[exp_subtype] = smap
+        end
+        smap[pkey] = true
       end
     end
+  end
+  conf._pc_ct_exact      = exact
+  conf._pc_ct_type_wild  = type_wild
+  conf._pc_ct_any        = any
+  conf._pc_prepared      = true
+end
 
-    if not method_match then
+
+local function cacheable_request(conf, cc)
+  prepare_lookups(conf)
+  do
+    local method = kong.request.get_method()
+    if not conf._pc_method_set[method] then
       return false
     end
   end
@@ -108,18 +199,10 @@ end
 
 
 local function cacheable_response(conf, cc)
-  -- TODO refactor these searches to O(1)
+  prepare_lookups(conf)
   do
     local status = kong.response.get_status()
-    local status_match = false
-    for i = 1, #conf.response_code do
-      if conf.response_code[i] == status then
-        status_match = true
-        break
-      end
-    end
-
-    if not status_match then
+    if not conf._pc_status_set[status] then
       return false
     end
   end
@@ -135,30 +218,32 @@ local function cacheable_response(conf, cc)
     end
 
     local t, subtype, params = parse_mime_type(content_type)
-    local content_match = false
-    for i = 1, #conf.content_type do
-      local expected_ct = conf.content_type[i]
-      local exp_type, exp_subtype, exp_params = parse_mime_type(expected_ct)
-      if exp_type then
-        if (exp_type == "*" or t == exp_type) and
-          (exp_subtype == "*" or subtype == exp_subtype) then
-          local params_match = true
-          for key, value in pairs(exp_params or EMPTY) do
-            if value ~= (params or EMPTY)[key] then
-              params_match = false
-              break
-            end
-          end
-          if params_match and
-            (nkeys(params or EMPTY) == nkeys(exp_params or EMPTY)) then
-            content_match = true
-            break
-          end
-        end
+    local pkey = params_key(params)
+    local match = false
+
+    -- exact type/subtype
+    local tmap = conf._pc_ct_exact[t]
+    if tmap then
+      local smap = tmap[subtype]
+      if smap and smap[pkey] then
+        match = true
+      end
+    end
+    -- type/* wildcard
+    if not match then
+      local tw = conf._pc_ct_type_wild[t]
+      if tw and tw[pkey] then
+        match = true
+      end
+    end
+    -- */* wildcard
+    if not match then
+      if conf._pc_ct_any[pkey] then
+        match = true
       end
     end
 
-    if not content_match then
+    if not match then
       return false
     end
   end
