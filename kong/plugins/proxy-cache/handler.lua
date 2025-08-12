@@ -66,7 +66,6 @@ local function get_prepared(conf)
   local parse_mime_type = mime_type.parse_mime_type
 
   for i = 1, #(conf.content_type or {}) do
-    local exp_type, exp_subtype, exp_params = parse_mime_type(conf.content_type[i])
     if exp_type then
       local pkey = params_key(exp_params)
       if exp_type == "*" and exp_subtype == "*" then
@@ -243,12 +242,14 @@ local function ct_is_cacheable(conf, raw_ct)
   return false
 end
 
-local function cacheable_request(conf, cc)
+local function cacheable_request(conf, cc, method)
   -- method check is O(1)
   do
     local method = kong.request.get_method()
     local p = get_prepared(conf)
     if not p.method_set[method] then
+    local m = method or kong.request.get_method()
+    if not p.method_set[m] then
       return false
     end
   end
@@ -338,10 +339,10 @@ function ProxyCacheHandler:init_worker()
 end
 
 function ProxyCacheHandler:access(conf)
-  local cc = req_cc()
+  local cc = conf.cache_control and req_cc() or EMPTY
 
   -- if we know this request isn't cacheable, bail out
-  if not cacheable_request(conf, cc) then
+  if not cacheable_request(conf, cc, method) then
     set_header(conf, "X-Cache-Status", "Bypass")
     return
   end
@@ -356,6 +357,7 @@ function ProxyCacheHandler:access(conf)
   end
 
   local p = get_prepared(conf)
+  kong.ctx.plugin._pc_p = p
 
   -- Only build query/headers tables if we actually vary on them
   local params_tbl
@@ -375,7 +377,7 @@ function ProxyCacheHandler:access(conf)
   local key, err = cache_key.build_cache_key(
     consumer and consumer.id,
     route    and route.id,
-    kong.request.get_method(),
+    method,
     uri,
     params_tbl,
     headers_tbl,
@@ -389,7 +391,7 @@ function ProxyCacheHandler:access(conf)
   set_header(conf, "X-Cache-Key", key)
 
   -- try to fetch the cached object from the computed cache key
-  local strategy = get_prepared(conf).strategy
+  local strategy = p.strategy
 
   local ctx = kong.ctx.plugin
   local res, ferr = strategy:fetch(key)
@@ -442,14 +444,15 @@ function ProxyCacheHandler:access(conf)
 
   ngx.ctx.KONG_PROXIED = true
 
-  for k in pairs(res.headers) do
+  local h = res.headers
+  for k in pairs(h) do
     if not overwritable_header(k) then
-      res.headers[k] = nil
+      h[k] = nil
     end
   end
 
   reset_res_header(res)
-  set_res_header(res, "Age", floor(time() - res.timestamp), conf)
+  set_res_header(res, "Age", floor(now - res.timestamp), conf)
   set_res_header(res, "X-Cache-Status", "Hit", conf)
   set_res_header(res, "X-Cache-Key", key, conf)
 
@@ -466,7 +469,7 @@ function ProxyCacheHandler:header_filter(conf)
     return
   end
 
-  local cc = res_cc()
+  local cc = conf.cache_control and res_cc() or EMPTY
 
   -- if this is a cacheable request, gather the headers and mark it so
   if cacheable_response(conf, cc) then
@@ -490,7 +493,7 @@ function ProxyCacheHandler:body_filter(conf)
 
   local body = kong.response.get_raw_body()
   if body then
-    local strategy = get_prepared(conf).strategy
+    local strategy = (kong.ctx.plugin._pc_p or get_prepared(conf)).strategy
 
     local res = {
       status    = kong.response.get_status(),
