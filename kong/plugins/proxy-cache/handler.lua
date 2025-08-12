@@ -100,6 +100,20 @@ local function get_prepared(conf)
     end
   end
 
+  -- Normalize response_headers gating into a lowercase allow-map.
+  -- Defaults: all three headers ON (tests expect Age, X-Cache-Status, X-Cache-Key by default).
+  local allow = {
+    ["x-cache-status"] = true,
+    ["x-cache-key"]    = true,
+    ["age"]            = true,
+  }
+  if conf.response_headers ~= nil then
+    -- Start with defaults, then apply explicit user values (false disables)
+    for k, v in pairs(conf.response_headers) do
+      allow[string.lower(k)] = (v ~= false)
+    end
+  end
+
   local strategy = require(STRATEGY_PATH)({
     strategy_name = conf.strategy,
     strategy_opts = conf[conf.strategy],
@@ -116,6 +130,9 @@ local function get_prepared(conf)
     ct_exact   = exact,
     ct_type_w  = type_wild,
     ct_any     = any,
+
+    -- header gating
+    hdrs_allow = allow,
 
     strategy   = strategy,
   }
@@ -158,7 +175,8 @@ local function overwritable_header(header)
 end
 
 local function set_header(conf, header, value)
-  if ngx.var.http_kong_debug or conf.response_headers[header] then
+  local p = get_prepared(conf)
+  if ngx.var.http_kong_debug or p.hdrs_allow[lower(header)] then
     kong.response.set_header(header, value)
   end
 end
@@ -170,7 +188,8 @@ local function reset_res_header(res)
 end
 
 local function set_res_header(res, header, value, conf)
-  if ngx.var.http_kong_debug or conf.response_headers[header] then
+  local p = get_prepared(conf)
+  if ngx.var.http_kong_debug or p.hdrs_allow[lower(header)] then
     res.headers[header] = value
   end
 end
