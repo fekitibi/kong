@@ -4,6 +4,10 @@ local kong_meta   = require "kong.meta"
 local mime_type   = require "kong.tools.mime_type"
 local nkeys       = require "table.nkeys"
 
+local STRATEGY_PATH = "kong.plugins.proxy-cache.strategies"
+local CACHE_VERSION = 1
+local EMPTY = require("kong.tools.table").EMPTY
+
 local splitn      = require("kong.tools.string").splitn
 
 -- weak-key map: conf -> prepared lookup tables & per-conf state
@@ -66,6 +70,7 @@ local function get_prepared(conf)
   local parse_mime_type = mime_type.parse_mime_type
 
   for i = 1, #(conf.content_type or {}) do
+    local exp_type, exp_subtype, exp_params = parse_mime_type(conf.content_type[i])
     if exp_type then
       local pkey = params_key(exp_params)
       if exp_type == "*" and exp_subtype == "*" then
@@ -130,10 +135,6 @@ local resp_get_headers = ngx.resp and ngx.resp.get_headers
 local parse_mime_type  = mime_type.parse_mime_type
 local parse_directive_header = require("kong.tools.http").parse_directive_header
 local calculate_resource_ttl = require("kong.tools.http").calculate_resource_ttl
-
-local STRATEGY_PATH = "kong.plugins.proxy-cache.strategies"
-local CACHE_VERSION = 1
-local EMPTY = require("kong.tools.table").EMPTY
 
 -- http://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html#sec13.5.1
 -- note content-length is not strictly hop-by-hop but we will be
@@ -244,14 +245,10 @@ end
 
 local function cacheable_request(conf, cc, method)
   -- method check is O(1)
-  do
-    local method = kong.request.get_method()
-    local p = get_prepared(conf)
-    if not p.method_set[method] then
-    local m = method or kong.request.get_method()
-    if not p.method_set[m] then
-      return false
-    end
+  local p = get_prepared(conf)
+  local m = method or kong.request.get_method()
+  if not p.method_set[m] then
+    return false
   end
 
   -- explicit disallow directives or Authorization header present
@@ -340,6 +337,7 @@ end
 
 function ProxyCacheHandler:access(conf)
   local cc = conf.cache_control and req_cc() or EMPTY
+  local method = kong.request.get_method()
 
   -- if we know this request isn't cacheable, bail out
   if not cacheable_request(conf, cc, method) then
@@ -352,7 +350,7 @@ function ProxyCacheHandler:access(conf)
   local uri = kong.request.get_path()
 
   -- if we want the cache-key uri only to be lowercase
-  if conf.ignore_uri_case then
+  if conf.ignore_uri_case and uri then
     uri = lower(uri)
   end
 
