@@ -105,6 +105,9 @@ local function get_prepared(conf)
     method_set = build_set(conf.request_method or {}),
     status_set = build_set(conf.response_code or {}),
 
+    vary_q_enabled = (conf.vary_query_params or EMPTY)[1] ~= nil,
+    vary_h_enabled = (conf.vary_headers or EMPTY)[1] ~= nil,
+
     -- CT matching structures (prebuilt once; O(1) at runtime)
     ct_exact   = exact,
     ct_type_w  = type_wild,
@@ -173,28 +176,53 @@ local function set_res_header(res, header, value, conf)
 end
 
 local function req_cc()
-  return parse_directive_header(ngx.var.http_cache_control)
+  return parse_directive_header(kong.request.get_header("cache-control"))
 end
 
 local function res_cc()
   return parse_directive_header(ngx.var.sent_http_cache_control)
 end
 
--- O(1) CT check using prebuilt maps
+-- O(1) CT check using prebuilt maps (no LRU)
 local function ct_is_cacheable(conf, raw_ct)
   if not raw_ct or type(raw_ct) == "table" or raw_ct == "" then
     return false
   end
 
   local p = get_prepared(conf)
+
   local t, subtype, params = parse_mime_type(raw_ct)
   if not t then
     return false
   end
 
+  -- Fast path: no parameters -> avoid building a params key
+  if not params or nkeys(params) == 0 then
+    local pk = ""
+
+    local tmap = p.ct_exact[t]
+    if tmap then
+      local smap = tmap[subtype]
+      if smap and smap[pk] then
+        return true
+      end
+    end
+
+    local tw = p.ct_type_w[t]
+    if tw and tw[pk] then
+      return true
+    end
+
+    if p.ct_any[pk] then
+      return true
+    end
+
+    return false
+  end
+
+  -- With parameters present, compute canonical params key once
   local pk = params_key(params)
 
-  -- exact type/subtype + exact params
   local tmap = p.ct_exact[t]
   if tmap then
     local smap = tmap[subtype]
@@ -203,13 +231,11 @@ local function ct_is_cacheable(conf, raw_ct)
     end
   end
 
-  -- type/* + exact params
   local tw = p.ct_type_w[t]
   if tw and tw[pk] then
     return true
   end
 
-  -- */* + exact params
   if p.ct_any[pk] then
     return true
   end
@@ -329,13 +355,30 @@ function ProxyCacheHandler:access(conf)
     uri = lower(uri)
   end
 
+  local p = get_prepared(conf)
+
+  -- Only build query/headers tables if we actually vary on them
+  local params_tbl
+  if p.vary_q_enabled then
+    params_tbl = kong.request.get_query()
+  else
+    params_tbl = EMPTY
+  end
+
+  local headers_tbl
+  if p.vary_h_enabled then
+    headers_tbl = kong.request.get_headers()
+  else
+    headers_tbl = EMPTY
+  end
+
   local key, err = cache_key.build_cache_key(
     consumer and consumer.id,
     route    and route.id,
     kong.request.get_method(),
     uri,
-    kong.request.get_query(),
-    kong.request.get_headers(),
+    params_tbl,
+    headers_tbl,
     conf
   )
   if err then
