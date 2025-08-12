@@ -109,7 +109,7 @@ local function get_prepared(conf)
     method_set = build_set(conf.request_method or {}),
     status_set = build_set(conf.response_code or {}),
 
-    vary_q_enabled = (conf.vary_query_params or EMPTY)[1] ~= nil,
+    vary_q_enabled = (conf.vary_query_params == nil) or ((conf.vary_query_params or EMPTY)[1] ~= nil),
     vary_h_enabled = (conf.vary_headers or EMPTY)[1] ~= nil,
 
     -- CT matching structures (prebuilt once; O(1) at runtime)
