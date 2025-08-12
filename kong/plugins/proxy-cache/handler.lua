@@ -96,6 +96,11 @@ local function get_prepared(conf)
     end
   end
 
+  local strategy = require(STRATEGY_PATH)({
+    strategy_name = conf.strategy,
+    strategy_opts = conf[conf.strategy],
+  })
+
   p = {
     method_set = build_set(conf.request_method or {}),
     status_set = build_set(conf.response_code or {}),
@@ -104,6 +109,8 @@ local function get_prepared(conf)
     ct_exact   = exact,
     ct_type_w  = type_wild,
     ct_any     = any,
+
+    strategy   = strategy,
   }
 
   prepared_by_conf[conf] = p
@@ -118,8 +125,6 @@ local floor            = math.floor
 local lower            = string.lower
 local time             = ngx.time
 local resp_get_headers = ngx.resp and ngx.resp.get_headers
-local ngx_re_sub       = ngx.re.gsub
-local ngx_re_match     = ngx.re.match
 local parse_mime_type  = mime_type.parse_mime_type
 local parse_directive_header = require("kong.tools.http").parse_directive_header
 local calculate_resource_ttl = require("kong.tools.http").calculate_resource_ttl
@@ -146,7 +151,7 @@ local hop_by_hop_headers = {
 local function overwritable_header(header)
   local n_header = lower(header)
   return not hop_by_hop_headers[n_header]
-     and not ngx_re_match(n_header, "ratelimit-remaining", "jo")
+     and not string.find(n_header, "ratelimit-remaining", 1, true)
 end
 
 local function set_header(conf, header, value)
@@ -223,7 +228,7 @@ local function cacheable_request(conf, cc)
   end
 
   -- explicit disallow directives or Authorization header present
-  if conf.cache_control and (cc["no-store"] or cc["no-cache"] or ngx.var.authorization) then
+  if conf.cache_control and (cc["no-store"] or cc["no-cache"] or kong.request.get_header("authorization")) then
     return false
   end
 
@@ -317,7 +322,7 @@ function ProxyCacheHandler:access(conf)
 
   local consumer = kong.client.get_consumer()
   local route = kong.router.get_route()
-  local uri = ngx_re_sub(ngx.var.request, "\\?.*", "", "oj")
+  local uri = kong.request.get_path()
 
   -- if we want the cache-key uri only to be lowercase
   if conf.ignore_uri_case then
@@ -341,10 +346,7 @@ function ProxyCacheHandler:access(conf)
   set_header(conf, "X-Cache-Key", key)
 
   -- try to fetch the cached object from the computed cache key
-  local strategy = require(STRATEGY_PATH)({
-    strategy_name = conf.strategy,
-    strategy_opts = conf[conf.strategy],
-  })
+  local strategy = get_prepared(conf).strategy
 
   local ctx = kong.ctx.plugin
   local res, ferr = strategy:fetch(key)
@@ -445,10 +447,7 @@ function ProxyCacheHandler:body_filter(conf)
 
   local body = kong.response.get_raw_body()
   if body then
-    local strategy = require(STRATEGY_PATH)({
-      strategy_name = conf.strategy,
-      strategy_opts = conf[conf.strategy],
-    })
+    local strategy = get_prepared(conf).strategy
 
     local res = {
       status    = kong.response.get_status(),
