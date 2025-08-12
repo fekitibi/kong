@@ -3,8 +3,112 @@ local cache_key   = require "kong.plugins.proxy-cache.cache_key"
 local kong_meta   = require "kong.meta"
 local mime_type   = require "kong.tools.mime_type"
 local nkeys       = require "table.nkeys"
+
 local splitn      = require("kong.tools.string").splitn
 
+-- weak-key map: conf -> prepared lookup tables & per-conf state
+local prepared_by_conf = setmetatable({}, { __mode = "k" })
+
+-- Build a set (hash) from an array-like table
+local function build_set(t)
+  local s = {}
+  for i = 1, #t do
+    s[t[i]] = true
+  end
+  return s
+end
+
+-- JIT-friendly in-place insertion sort for small arrays of strings
+local function isort(a)
+  for i = 2, #a do
+    local v = a[i]
+    local j = i - 1
+    while j >= 1 and a[j] > v do
+      a[j + 1] = a[j]
+      j = j - 1
+    end
+    a[j + 1] = v
+  end
+end
+
+-- Canonicalize MIME params to a stable key like "charset=utf-8;q=1"
+local function params_key(params)
+  if not params or nkeys(params) == 0 then
+    return ""
+  end
+  local keys, n = {}, 0
+  for k in pairs(params) do
+    n = n + 1; keys[n] = k
+  end
+  isort(keys)
+
+  local parts, m = {}, 0
+  for i = 1, n do
+    local k = keys[i]
+    m = m + 1
+    parts[m] = k .. "=" .. (params[k] or "")
+  end
+  return table.concat(parts, ";")
+end
+
+-- Return (and cache) per-conf prepared state for O(1) lookups
+local function get_prepared(conf)
+  local p = prepared_by_conf[conf]
+  if p then
+    return p
+  end
+
+  -- Build Content-Type lookup structures once per-conf:
+  --   exact[type][subtype][paramsKey] = true
+  --   type_wild[type][paramsKey]     = true    (type/*)
+  --   any[paramsKey]                 = true    (*/*)
+  local exact, type_wild, any = {}, {}, {}
+  local parse_mime_type = mime_type.parse_mime_type
+
+  for i = 1, #(conf.content_type or {}) do
+    local exp_type, exp_subtype, exp_params = parse_mime_type(conf.content_type[i])
+    if exp_type then
+      local pkey = params_key(exp_params)
+      if exp_type == "*" and exp_subtype == "*" then
+        any[pkey] = true
+
+      elseif exp_subtype == "*" then
+        local tw = type_wild[exp_type]
+        if not tw then
+          tw = {}
+          type_wild[exp_type] = tw
+        end
+        tw[pkey] = true
+
+      else
+        local tmap = exact[exp_type]
+        if not tmap then
+          tmap = {}
+          exact[exp_type] = tmap
+        end
+        local smap = tmap[exp_subtype]
+        if not smap then
+          smap = {}
+          tmap[exp_subtype] = smap
+        end
+        smap[pkey] = true
+      end
+    end
+  end
+
+  p = {
+    method_set = build_set(conf.request_method or {}),
+    status_set = build_set(conf.response_code or {}),
+
+    -- CT matching structures (prebuilt once; O(1) at runtime)
+    ct_exact   = exact,
+    ct_type_w  = type_wild,
+    ct_any     = any,
+  }
+
+  prepared_by_conf[conf] = p
+  return p
+end
 
 local ngx              = ngx
 local kong             = kong
@@ -20,13 +124,9 @@ local parse_mime_type  = mime_type.parse_mime_type
 local parse_directive_header = require("kong.tools.http").parse_directive_header
 local calculate_resource_ttl = require("kong.tools.http").calculate_resource_ttl
 
-
-
-
 local STRATEGY_PATH = "kong.plugins.proxy-cache.strategies"
 local CACHE_VERSION = 1
 local EMPTY = require("kong.tools.table").EMPTY
-
 
 -- http://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html#sec13.5.1
 -- note content-length is not strictly hop-by-hop but we will be
@@ -43,10 +143,8 @@ local hop_by_hop_headers = {
   ["content-length"]      = true,
 }
 
-
 local function overwritable_header(header)
   local n_header = lower(header)
-
   return not hop_by_hop_headers[n_header]
      and not ngx_re_match(n_header, "ratelimit-remaining", "jo")
 end
@@ -73,98 +171,84 @@ local function req_cc()
   return parse_directive_header(ngx.var.http_cache_control)
 end
 
-
 local function res_cc()
   return parse_directive_header(ngx.var.sent_http_cache_control)
 end
 
+-- O(1) CT check using prebuilt maps
+local function ct_is_cacheable(conf, raw_ct)
+  if not raw_ct or type(raw_ct) == "table" or raw_ct == "" then
+    return false
+  end
+
+  local p = get_prepared(conf)
+  local t, subtype, params = parse_mime_type(raw_ct)
+  if not t then
+    return false
+  end
+
+  local pk = params_key(params)
+
+  -- exact type/subtype + exact params
+  local tmap = p.ct_exact[t]
+  if tmap then
+    local smap = tmap[subtype]
+    if smap and smap[pk] then
+      return true
+    end
+  end
+
+  -- type/* + exact params
+  local tw = p.ct_type_w[t]
+  if tw and tw[pk] then
+    return true
+  end
+
+  -- */* + exact params
+  if p.ct_any[pk] then
+    return true
+  end
+
+  return false
+end
 
 local function cacheable_request(conf, cc)
-  -- TODO refactor these searches to O(1)
+  -- method check is O(1)
   do
     local method = kong.request.get_method()
-    local method_match = false
-    for i = 1, #conf.request_method do
-      if conf.request_method[i] == method then
-        method_match = true
-        break
-      end
-    end
-
-    if not method_match then
+    local p = get_prepared(conf)
+    if not p.method_set[method] then
       return false
     end
   end
 
-  -- check for explicit disallow directives
-  -- TODO note that no-cache isnt quite accurate here
-  if conf.cache_control and (cc["no-store"] or cc["no-cache"] or
-     ngx.var.authorization) then
+  -- explicit disallow directives or Authorization header present
+  if conf.cache_control and (cc["no-store"] or cc["no-cache"] or ngx.var.authorization) then
     return false
   end
 
   return true
 end
 
-
 local function cacheable_response(conf, cc)
-  -- TODO refactor these searches to O(1)
+  -- status check is O(1)
   do
     local status = kong.response.get_status()
-    local status_match = false
-    for i = 1, #conf.response_code do
-      if conf.response_code[i] == status then
-        status_match = true
-        break
-      end
-    end
-
-    if not status_match then
+    local p = get_prepared(conf)
+    if not p.status_set[status] then
       return false
     end
   end
 
+  -- content-type check is O(1)
   do
     local content_type = ngx.var.sent_http_content_type
-
-    -- bail if we cannot examine this content type
-    if not content_type or type(content_type) == "table" or
-       content_type == "" then
-
-      return false
-    end
-
-    local t, subtype, params = parse_mime_type(content_type)
-    local content_match = false
-    for i = 1, #conf.content_type do
-      local expected_ct = conf.content_type[i]
-      local exp_type, exp_subtype, exp_params = parse_mime_type(expected_ct)
-      if exp_type then
-        if (exp_type == "*" or t == exp_type) and
-          (exp_subtype == "*" or subtype == exp_subtype) then
-          local params_match = true
-          for key, value in pairs(exp_params or EMPTY) do
-            if value ~= (params or EMPTY)[key] then
-              params_match = false
-              break
-            end
-          end
-          if params_match and
-            (nkeys(params or EMPTY) == nkeys(exp_params or EMPTY)) then
-            content_match = true
-            break
-          end
-        end
-      end
-    end
-
-    if not content_match then
+    if not ct_is_cacheable(conf, content_type) then
       return false
     end
   end
 
-  if conf.cache_control and (cc["private"] or cc["no-store"] or cc["no-cache"])
-  then
+  if conf.cache_control and (cc["private"] or cc["no-store"] or cc["no-cache"]) then
     return false
   end
 
@@ -175,21 +259,16 @@ local function cacheable_response(conf, cc)
   return true
 end
 
-
 -- indicate that we should attempt to cache the response to this request
 local function signal_cache_req(ctx, conf, cache_key, cache_status)
-  ctx.proxy_cache = {
-    cache_key = cache_key,
-  }
+  ctx.proxy_cache = { cache_key = cache_key }
   set_header(conf, "X-Cache-Status", cache_status or "Miss")
 end
-
 
 local ProxyCacheHandler = {
   VERSION = kong_meta.version,
   PRIORITY = 100,
 }
-
 
 function ProxyCacheHandler:init_worker()
   -- catch notifications from other nodes that we purged a cache entry
@@ -213,26 +292,24 @@ function ProxyCacheHandler:init_worker()
     })
 
     if cache_key ~= "nil" then
-      local ok, err = strategy:purge(cache_key)
+      local ok, e = strategy:purge(cache_key)
       if not ok then
-        kong.log.err("failed to purge cache key '", cache_key, "': ", err)
+        kong.log.err("failed to purge cache key '", cache_key, "': ", e)
         return
       end
-
     else
-      local ok, err = strategy:flush(true)
+      local ok, e = strategy:flush(true)
       if not ok then
-        kong.log.err("error in flushing cache data: ", err)
+        kong.log.err("error in flushing cache data: ", e)
       end
     end
   end)
 end
 
-
 function ProxyCacheHandler:access(conf)
   local cc = req_cc()
 
-  -- if we know this request isnt cacheable, bail out
+  -- if we know this request isn't cacheable, bail out
   if not cacheable_request(conf, cc) then
     set_header(conf, "X-Cache-Status", "Bypass")
     return
@@ -247,19 +324,21 @@ function ProxyCacheHandler:access(conf)
     uri = lower(uri)
   end
 
-  local cache_key, err = cache_key.build_cache_key(consumer and consumer.id,
-                                                   route    and route.id,
-                                                   kong.request.get_method(),
-                                                   uri,
-                                                   kong.request.get_query(),
-                                                   kong.request.get_headers(),
-                                                   conf)
+  local key, err = cache_key.build_cache_key(
+    consumer and consumer.id,
+    route    and route.id,
+    kong.request.get_method(),
+    uri,
+    kong.request.get_query(),
+    kong.request.get_headers(),
+    conf
+  )
   if err then
     kong.log.err(err)
     return
   end
 
-  set_header(conf, "X-Cache-Key", cache_key)
+  set_header(conf, "X-Cache-Key", key)
 
   -- try to fetch the cached object from the computed cache key
   local strategy = require(STRATEGY_PATH)({
@@ -268,70 +347,55 @@ function ProxyCacheHandler:access(conf)
   })
 
   local ctx = kong.ctx.plugin
-  local res, err = strategy:fetch(cache_key)
-  if err == "request object not in cache" then -- TODO make this a utils enum err
-
-    -- this request wasn't found in the data store, but the client only wanted
-    -- cache data. see https://tools.ietf.org/html/rfc7234#section-5.2.1.7
+  local res, ferr = strategy:fetch(key)
+  if ferr == "request object not in cache" then
+    -- this request wasn't found in the data store, but the client only wanted cached data
     if conf.cache_control and cc["only-if-cached"] then
       return kong.response.exit(ngx.HTTP_GATEWAY_TIMEOUT)
     end
 
     ctx.req_body = kong.request.get_raw_body()
 
-    -- this request is cacheable but wasn't found in the data store
-    -- make a note that we should store it in cache later,
-    -- and pass the request upstream
-    return signal_cache_req(ctx, conf, cache_key)
+    -- mark to store later; pass upstream
+    return signal_cache_req(ctx, conf, key)
 
-  elseif err then
-    kong.log.err(err)
+  elseif ferr then
+    kong.log.err(ferr)
     return
   end
 
   if res.version ~= CACHE_VERSION then
-    kong.log.notice("cache format mismatch, purging ", cache_key)
-    strategy:purge(cache_key)
-    return signal_cache_req(ctx, conf, cache_key, "Bypass")
+    kong.log.notice("cache format mismatch, purging ", key)
+    strategy:purge(key)
+    return signal_cache_req(ctx, conf, key, "Bypass")
   end
 
-  -- figure out if the client will accept our cache value
+  -- decide if client accepts cached value
+  local now = time()
   if conf.cache_control then
-    if cc["max-age"] and time() - res.timestamp > cc["max-age"] then
-      return signal_cache_req(ctx, conf, cache_key, "Refresh")
+    if cc["max-age"]   and now - res.timestamp > cc["max-age"] then
+      return signal_cache_req(ctx, conf, key, "Refresh")
     end
-
-    if cc["max-stale"] and time() - res.timestamp - res.ttl > cc["max-stale"]
-    then
-      return signal_cache_req(ctx, conf, cache_key, "Refresh")
+    if cc["max-stale"] and (now - res.timestamp - res.ttl) > cc["max-stale"] then
+      return signal_cache_req(ctx, conf, key, "Refresh")
     end
-
-    if cc["min-fresh"] and res.ttl - (time() - res.timestamp) < cc["min-fresh"]
-    then
-      return signal_cache_req(ctx, conf, cache_key, "Refresh")
+    if cc["min-fresh"] and (res.ttl - (now - res.timestamp)) < cc["min-fresh"] then
+      return signal_cache_req(ctx, conf, key, "Refresh")
     end
-
   else
-    -- don't serve stale data; res may be stored for up to `conf.storage_ttl` secs
-    if time() - res.timestamp > conf.cache_ttl then
-      return signal_cache_req(ctx, conf, cache_key, "Refresh")
+    if now - res.timestamp > conf.cache_ttl then
+      return signal_cache_req(ctx, conf, key, "Refresh")
     end
   end
 
-  -- we have cache data yo!
-  -- expose response data for logging plugins
-  local response_data = {
+  -- cache hit: expose response data for logging plugins
+  kong.ctx.shared.proxy_cache_hit = {
     res = res,
-    req = {
-      body = res.req_body,
-    },
+    req = { body = res.req_body },
     server_addr = ngx.var.server_addr,
   }
 
-  kong.ctx.shared.proxy_cache_hit = response_data
-
-  local nctx = ngx.ctx
-  nctx.KONG_PROXIED = true
+  ngx.ctx.KONG_PROXIED = true
 
   for k in pairs(res.headers) do
     if not overwritable_header(k) then
@@ -339,15 +403,13 @@ function ProxyCacheHandler:access(conf)
     end
   end
 
-
   reset_res_header(res)
-  set_res_header(res, "age", floor(time() - res.timestamp), conf)
+  set_res_header(res, "Age", floor(time() - res.timestamp), conf)
   set_res_header(res, "X-Cache-Status", "Hit", conf)
-  set_res_header(res, "X-Cache-Key", cache_key, conf)
+  set_res_header(res, "X-Cache-Key", key, conf)
 
   return kong.response.exit(res.status, res.body, res.headers)
 end
-
 
 function ProxyCacheHandler:header_filter(conf)
   local ctx = kong.ctx.plugin
@@ -363,10 +425,9 @@ function ProxyCacheHandler:header_filter(conf)
 
   -- if this is a cacheable request, gather the headers and mark it so
   if cacheable_response(conf, cc) then
-    -- TODO: should this use the kong.conf configured limit?
+    -- zero-limit means "all headers"; use raw = true for less copying
     proxy_cache.res_headers = resp_get_headers(0, true)
-    proxy_cache.res_ttl = conf.cache_control and calculate_resource_ttl(cc) or conf.cache_ttl
-
+    proxy_cache.res_ttl     = conf.cache_control and calculate_resource_ttl(cc) or conf.cache_ttl
   else
     set_header(conf, "X-Cache-Status", "Bypass")
     ctx.proxy_cache = nil
@@ -374,7 +435,6 @@ function ProxyCacheHandler:header_filter(conf)
 
   -- TODO handle Vary header
 end
-
 
 function ProxyCacheHandler:body_filter(conf)
   local ctx = kong.ctx.plugin
@@ -401,8 +461,7 @@ function ProxyCacheHandler:body_filter(conf)
       req_body  = ctx.req_body,
     }
 
-    local ttl = conf.storage_ttl or conf.cache_control and proxy_cache.res_ttl or
-                conf.cache_ttl
+    local ttl = conf.storage_ttl or (conf.cache_control and proxy_cache.res_ttl) or conf.cache_ttl
 
     local ok, err = strategy:store(proxy_cache.cache_key, res, ttl)
     if not ok then
@@ -410,6 +469,5 @@ function ProxyCacheHandler:body_filter(conf)
     end
   end
 end
-
 
 return ProxyCacheHandler
