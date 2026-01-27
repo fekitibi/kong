@@ -34,6 +34,10 @@ local ngx_INFO = ngx.INFO
 local ngx_DEBUG = ngx.DEBUG
 
 
+-- number of versions behind before a full sync is forced
+local FULL_SYNC_THRESHOLD = 512
+
+
 function _M.new(strategy)
   local self = {
     strategy = strategy,
@@ -45,6 +49,11 @@ end
 
 local function empty_sync_result()
   return { default = { deltas = {}, full_sync = false, }, }
+end
+
+
+local function inc_sync_result(deltas)
+  return { default = { deltas = deltas, full_sync = false, }, }
 end
 
 
@@ -121,13 +130,54 @@ function _M:init_cp(manager)
       return nil, err
     end
 
-    --  string comparison effectively does the same as number comparison
-    if not self.strategy:is_valid_version(default_namespace_version) or
-       default_namespace_version ~= latest_version then
+    -- if the node has the latest version, no sync needed
+    if self.strategy:is_valid_version(default_namespace_version) and
+       default_namespace_version == latest_version then
+      return empty_sync_result()
+    end
+
+    -- convert versions to numbers for comparison
+    local default_version_num = self.strategy:version_to_number(default_namespace_version)
+    local latest_version_num = self.strategy:version_to_number(latest_version)
+
+    -- is the node empty or too far behind? force a full sync
+    if default_version_num == 0 or
+       latest_version_num - default_version_num > FULL_SYNC_THRESHOLD
+    then
+      ngx_log(ngx_INFO,
+              "[kong.sync.v2] database is empty or too far behind for node_id: ", node_id,
+              ", current_version: ", default_namespace_version,
+              ", forcing a full sync")
+
       return full_sync_result()
     end
 
-    return empty_sync_result()
+    -- try incremental sync
+    local res, err = self.strategy:get_delta(default_namespace_version)
+    if not res then
+      return nil, err
+    end
+
+    if isempty(res) then
+      -- node is already up to date
+      return empty_sync_result()
+    end
+
+    -- some deltas are returned, check if they are contiguous
+    local first_delta_version_num = self.strategy:version_to_number(res[1].version)
+    if first_delta_version_num == default_version_num + 1 then
+      -- deltas are contiguous, incremental sync
+      return inc_sync_result(res)
+    end
+
+    -- we need to full sync because holes are found
+    -- in the delta, meaning the oldest version is no longer available
+    ngx_log(ngx_INFO,
+            "[kong.sync.v2] delta for node_id no longer available: ", node_id,
+            ", current_version: ", default_namespace_version,
+            ", forcing a full sync")
+
+    return full_sync_result()
   end)
 end
 

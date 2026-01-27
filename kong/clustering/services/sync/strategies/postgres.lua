@@ -2,10 +2,19 @@ local _M = {}
 local _MT = { __index = _M }
 
 
+local cjson = require("cjson.safe")
+local buffer = require("string.buffer")
+
+
 local type = type
 local sub = string.sub
 local fmt = string.format
+local ipairs = ipairs
+local ngx_log = ngx.log
 local ngx_null = ngx.null
+local ngx_ERR = ngx.ERR
+local cjson_encode = cjson.encode
+local cjson_decode = cjson.decode
 
 
 -- version string should look like: "v02_0000"
@@ -14,6 +23,10 @@ local VER_PREFIX_LEN = #VER_PREFIX
 local VER_DIGITS = 28
 -- equivalent to "v02_" .. "%028x"
 local VERSION_FMT = VER_PREFIX .. "%0" .. VER_DIGITS .. "x"
+
+-- number of deltas to keep before cleanup
+local KEEP_VERSION_COUNT = 100
+local CLEANUP_TIME_DELAY = 3600  -- 1 hour
 
 
 function _M.new(db)
@@ -25,23 +38,78 @@ function _M.new(db)
 end
 
 
--- reserved for future
+local PURGE_QUERY = [[
+  DELETE FROM clustering_sync_version
+  WHERE "version" < (
+      SELECT MAX("version") - %d
+      FROM clustering_sync_version
+  );
+]]
+
+
 function _M:init_worker()
+  local function cleanup_handler(premature)
+    if premature then
+      return
+    end
+
+    local res, err = self.connector:query(fmt(PURGE_QUERY, KEEP_VERSION_COUNT))
+    if not res then
+      ngx_log(ngx_ERR,
+              "[incremental] unable to purge old data from incremental delta table, err: ",
+              err)
+
+      return
+    end
+  end
+
+  assert(ngx.timer.every(CLEANUP_TIME_DELAY, cleanup_handler))
 end
 
 
 local NEW_VERSION_QUERY = [[
   DO $$
   DECLARE
-    new_version integer;
+    new_version bigint;
   BEGIN
     INSERT INTO clustering_sync_version DEFAULT VALUES RETURNING version INTO new_version;
+    INSERT INTO clustering_sync_delta (version, type, pk, ws_id, entity) VALUES %s;
   END $$;
 ]]
 
 
-function _M:insert_delta()
-  return self.connector:query(NEW_VERSION_QUERY)
+-- deltas: {
+--   { type = "service", "pk" = { id = "d78eb00f..." }, "ws_id" = "73478cf6...", entity = <JSON or ngx.null>, }
+-- }
+function _M:insert_delta(deltas)
+  local buf = buffer.new()
+
+  local count = #deltas
+  for i = 1, count do
+    local d = deltas[i]
+
+    local entity_json
+    if d.entity == ngx_null then
+      entity_json = "NULL"
+    else
+      entity_json = self.connector:escape_literal(cjson_encode(d.entity))
+    end
+
+    buf:putf("(new_version, %s, %s, %s, %s)",
+             self.connector:escape_literal(d.type),
+             self.connector:escape_literal(cjson_encode(d.pk)),
+             self.connector:escape_literal(d.ws_id or kong.default_workspace),
+             entity_json)
+
+    -- sql values should be separated by comma
+    if i < count then
+      buf:put(",")
+    end
+  end
+
+  local sql = fmt(NEW_VERSION_QUERY, buf:get())
+
+  return self.connector:query(sql)
 end
 
 
@@ -59,6 +127,36 @@ function _M:get_latest_version()
   end
 
   return fmt(VERSION_FMT, ver)
+end
+
+
+-- get deltas after a specific version
+function _M:get_delta(version)
+  -- convert version string to number
+  local version_num = self:version_to_number(version)--tonumber(sub(version, VER_PREFIX_LEN + 1), 16)
+
+  local sql = "SELECT * FROM clustering_sync_delta" ..
+              " WHERE version > " .. self.connector:escape_literal(version_num) ..
+              " ORDER BY version ASC"
+
+  local res, err = self.connector:query(sql, "read")
+  if not res then
+    return nil, err
+  end
+
+  -- transform the result to include version as string format
+  for _, row in ipairs(res) do
+    row.version = fmt(VERSION_FMT, row.version)
+    row.pk = cjson_decode(row.pk)
+    if row.entity ~= ngx_null then
+      row.entity = cjson_decode(row.entity)
+    end
+    if row.ws_id == ngx_null then
+      row.ws_id = nil
+    end
+  end
+
+  return res
 end
 
 
@@ -86,6 +184,15 @@ function _M:is_valid_version(str)
   end
 
   return true
+end
+
+
+-- convert version string to number for comparison
+function _M:version_to_number(str)
+  if not self:is_valid_version(str) then
+    return 0
+  end
+  return tonumber(sub(str, VER_PREFIX_LEN + 1), 16)
 end
 
 

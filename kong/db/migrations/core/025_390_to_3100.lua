@@ -1,15 +1,6 @@
---- XXX CE [[
---- We don't need this in EE because an identical migration step is already existed.
 return {
   postgres = {
     up = [[
-      DO $$
-      BEGIN
-      DROP TABLE IF EXISTS clustering_sync_delta;
-      DROP INDEX IF EXISTS clustering_sync_delta_version_idx;
-      END;
-      $$;
-
       DO $$
         DECLARE
           db_version INTEGER;
@@ -30,9 +21,9 @@ return {
             EXECUTE 'ALTER SEQUENCE ' || seq_name || ' NO MAXVALUE';
           END IF;
           ALTER TABLE clustering_sync_version ALTER COLUMN version TYPE BIGINT USING version::BIGINT;
+          ALTER TABLE clustering_sync_delta ALTER COLUMN version TYPE BIGINT USING version::BIGINT;
         END;
       $$;
     ]]
   }
 }
---- XXX CE ]]
