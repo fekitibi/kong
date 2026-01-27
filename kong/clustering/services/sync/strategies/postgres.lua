@@ -88,18 +88,11 @@ function _M:insert_delta(deltas)
   for i = 1, count do
     local d = deltas[i]
 
-    local entity_json
-    if d.entity == ngx_null then
-      entity_json = "NULL"
-    else
-      entity_json = self.connector:escape_literal(cjson_encode(d.entity))
-    end
-
     buf:putf("(new_version, %s, %s, %s, %s)",
              self.connector:escape_literal(d.type),
              self.connector:escape_literal(cjson_encode(d.pk)),
              self.connector:escape_literal(d.ws_id or kong.default_workspace),
-             entity_json)
+             self.connector:escape_literal(cjson_encode(d.entity)))
 
     -- sql values should be separated by comma
     if i < count then
