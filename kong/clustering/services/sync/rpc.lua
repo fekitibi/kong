@@ -142,6 +142,7 @@ function _M:init_cp(manager)
 
     -- is the node empty or too far behind? force a full sync
     if default_version_num == 0 or
+       default_version_num > latest_version_num or
        latest_version_num - default_version_num > FULL_SYNC_THRESHOLD
     then
       ngx_log(ngx_INFO,
