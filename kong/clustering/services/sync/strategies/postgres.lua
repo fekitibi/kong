@@ -14,7 +14,6 @@ local ngx_log = ngx.log
 local ngx_null = ngx.null
 local ngx_ERR = ngx.ERR
 local cjson_encode = cjson.encode
-local cjson_decode = cjson.decode
 
 
 -- version string should look like: "v02_0000"
@@ -126,7 +125,7 @@ end
 -- get deltas after a specific version
 function _M:get_delta(version)
   -- convert version string to number
-  local version_num = self:version_to_number(version)--tonumber(sub(version, VER_PREFIX_LEN + 1), 16)
+  local version_num = self:version_to_number(version)
 
   local sql = "SELECT * FROM clustering_sync_delta" ..
               " WHERE version > " .. self.connector:escape_literal(version_num) ..
@@ -138,15 +137,9 @@ function _M:get_delta(version)
   end
 
   -- transform the result to include version as string format
+  -- note: pk and entity are JSON columns, pgmoon auto-decodes them
   for _, row in ipairs(res) do
     row.version = fmt(VERSION_FMT, row.version)
-    row.pk = cjson_decode(row.pk)
-    if row.entity ~= ngx_null then
-      row.entity = cjson_decode(row.entity)
-    end
-    if row.ws_id == ngx_null then
-      row.ws_id = nil
-    end
   end
 
   return res
